@@ -1,0 +1,30 @@
+rgb_example = np.array([[[255, 0, 0],
+                 [255, 255, 0], 
+                 [255, 255, 255]],
+                [[255, 0, 255],
+                 [0, 255, 0], 
+                 [0, 255, 255]],
+                [[0, 0, 0],
+                 [0, 255, 255], 
+                 [0, 0, 255]]])
+
+  # Load logo array
+black_logo = np.load("data/dc_logo_rgb_array.npy")
+# Take a look at its contents
+black_logo
+
+plt.imshow(black_logo)
+plt.show()
+
+  white_logo = np.where(black_logo == 0, 255, black_logo)
+
+  plt.imshow(white_logo)
+plt.show()
+
+
+  # Replace all instances of [0, 0, 0] with a 1D array of the rgb values for DataCamp pink
+pink_black_logo = np.where(black_logo != [0, 0, 0], [255, 110, 169], black_logo)
+
+
+  plt.imshow(pink_black_logo)
+plt.show()

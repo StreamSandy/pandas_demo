@@ -1,0 +1,161 @@
+Awesome brief. Here’s a battle-tested, zero-shot prompt you can drop into your agent—plus add-ons and a tiny example of the expected answer shape. It’s written to elicit Google-level design depth without forcing the model to reveal private reasoning.
+
+---
+
+# Zero-Shot Instruction Prompt (Final)
+
+**Role & Context**
+You are a principal software engineer designing **production-grade circuit breakers** for a large LLM application with ~30 Python scripts (micro-tools, services, CLIs). Assume an elite engineering bar (Google/billion-dollar startup).
+
+**Inputs**
+
+* Repository snapshot (files, tree, or links)
+* Runtime context: Python 3.x, Streamlit/FastAPI workers, LLM provider(s) (e.g., Gemini/OpenAI), pptx rendering, caching/queue layers (if any)
+
+**Primary Objective**
+
+1. **Discover the top two business-critical use cases** in the repo and justify why they’re top priority (traffic, revenue/user impact, SLO/SLA/error-budget risk, fan-out).
+2. **Design circuit breakers for each use case** with detailed, production-ready guidance.
+
+**Deliverables (must follow exactly)**
+A. **Bird’s-eye map (1–2 pages max)**
+
+* System diagram of major scripts/services and call graph to external dependencies (LLM API, storage, DB, network).
+* Hot paths and shared libraries that concentrate risk.
+* Error taxonomy: timeouts, 5xx/429, transport errors, parser/JSON errors, quota/exhaustion, idempotency risks.
+
+B. **Top-2 Use Cases (selection rationale)**
+
+* Table with: UseCase, CriticalityReason, SLI/SLO at risk (p95 latency, success rate), Current Fail Modes, Estimated Blast Radius.
+
+C. **Circuit Breaker Design per Use Case (deep dive)**
+For each use case, provide:
+
+1. **Trip conditions**
+
+   * Sliding window size (N calls or T seconds), failure-rate threshold (%), consecutive-error threshold, and latency p95/p99 threshold.
+   * Error classes included/excluded (e.g., count 5xx/timeout; exclude 4xx user errors).
+2. **States & transitions**
+
+   * Closed → Open → Half-Open with probe counts, decay, cool-down.
+3. **Retry/backoff**
+
+   * Max attempts, exponential backoff + full jitter, per-call **retry budget** and **global budget** to protect upstream.
+4. **Fallbacks & graceful degradation**
+
+   * LLM: cached answer/template, smaller/cheaper model, summarization mode, or “draft + user confirm”.
+   * PPT build: minimal theme, skip images, reduce slide count.
+5. **Idempotency & dedupe**
+
+   * Idempotency keys, request hashing for safe retries.
+6. **Observability**
+
+   * Metrics: `circuit_state{usecase}`, `trips_total`, `rejections_total`, `probe_success_total`, `fallback_invocations`, `retry_attempts`.
+   * Logs: structured, no PII; Traces: span links across retries/fallbacks.
+7. **Configuration & rollout**
+
+   * Config-as-code defaults + dynamic overrides (env/flags/config service).
+   * Canary, feature flag, blast radius controls.
+8. **Security & privacy**
+
+   * Don’t log prompts/outputs; guardrails for prompt injection; secrets via env/secret manager.
+9. **Testing plan**
+
+   * Unit (fakes), fault-injection (timeouts/5xx), load + chaos (latency spikes), game-day playbook.
+10. **Code artifacts**
+
+* **Python pseudo-code** for the breaker wrapper, plus a minimal **reference implementation** using either `pybreaker` or `tenacity` for retries and a custom state store (in-memory → Redis for multi-worker).
+* Integration points (decorators/middleware) and how to apply to the two hot paths without invasive changes.
+
+D. **STAR Write-ups (one per use case)**
+Use **S**ituation, **T**ask, **A**ctions (design choices, trade-offs, numbers), **R**esults (SLO improvement, error-budget burn reduction, cost/latency deltas). Keep to 8–12 bullets each.
+
+**Style & Constraints**
+
+* Be precise; no generic advice. Provide concrete thresholds, windows, and example numbers with rationale.
+* Show reasoning **via short justifications**—do not output private chain-of-thought.
+* Output sections **A–D** in order, with clear headings, tables where appropriate, and code blocks for pseudo-code.
+
+**Repository Snapshot**
+
+```
+[Paste tree or list of scripts here]
+```
+
+---
+
+## Add-Ons You Can Toggle (optional, if relevant)
+
+* **Multi-tenant isolation:** per-tenant breaker state to prevent noisy-neighbor effects.
+* **Client vs. server breaker:** justify placement (SDK/client, gateway, or server-side middleware).
+* **Quota-aware breaker:** separate trip logic for 429s vs 5xx.
+* **Adaptive thresholds:** increase/open faster during incident (burn-rate alerts).
+* **Cost guardrails:** automatic downgrade to cheaper LLM/model when breaker is half-open.
+
+---
+
+## Example Answer Shape (concise sample for one LLM call path)
+
+**Trip conditions**
+
+* Window: last **200** calls or **60s**, whichever first.
+* Trip if **failure_rate ≥ 15%** (timeouts, 5xx, DNS, TLS) **OR** if **p95 latency > 4s** for 3 consecutive windows **OR** **≥5** consecutive timeouts.
+
+**States**
+
+* **Open:** 30s cool-down (flag + timestamp).
+* **Half-Open:** allow 5 probes at 2s spacing; close on ≥4/5 success with p95 < 2.5s; else reopen 60s.
+
+**Retry & Backoff**
+
+* Max 2 retries per call, **exponential backoff with full jitter**: 300–700ms, then 600–1400ms. Global retry budget 10% of RPS.
+
+**Fallbacks**
+
+* Serve cached slide outline (24h TTL) or **fallback to smaller model**; if both fail, render minimal PPT with headers and placeholders.
+
+**Observability**
+
+* Metrics: `circuit_state{usecase="llm_generate"}`, `trips_total`, `fallback_invocations`, `probe_success_total`.
+* Trace: one span per attempt, link retries.
+
+**Config**
+
+* Env defaults, dynamic overrides via `CONFIG_BREAKERS.yaml` or Redis. Feature flag: `cb_llm_generate_v1`.
+
+**Python wrapper (pseudo-code)**
+
+```python
+def with_breaker(usecase):
+    def deco(fn):
+        def wrapped(*args, **kwargs):
+            state = breaker_store.get_state(usecase)
+            if state.is_open() and not state.allow_probe():
+                metrics.inc("rejections_total", usecase)
+                return fallback(usecase, *args, **kwargs)
+
+            try:
+                resp = retry_with_backoff(fn, *args, **kwargs)
+                breaker_store.record_success(usecase, latency_ms(resp))
+                return resp
+            except TransientUpstreamError as e:
+                breaker_store.record_failure(usecase, e)
+                if breaker_store.should_trip(usecase):
+                    breaker_store.open(usecase)
+                    alert("circuit_tripped", usecase)
+                return fallback(usecase, *args, **kwargs)
+        return wrapped
+    return deco
+```
+
+---
+
+## Why this prompt works
+
+* **Concrete outputs** (A–D) prevent hand-wavy answers.
+* **Numbers + thresholds** force engineering rigor.
+* **STAR** ensures stakeholder-friendly reporting.
+* **Privacy note** avoids chain-of-thought leakage while still demanding justifications.
+* **Code + rollout** makes it immediately actionable.
+
+If you want, I can adapt this to your **ppt-ai-generator** repo specifically (LLM slide generation + PPT build as the two hot paths) and pre-fill suggested thresholds and metrics.

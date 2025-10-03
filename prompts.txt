@@ -1,4 +1,8 @@
 
+
+I’ve exported the complete list of modules from our internal Python library ent_pycore. This should help us during design and implementation of our NFR stories.
+Please find the attached/exported list for your reference.
+>>>>>>>>>>>>>>>>>>>>>
 As discussed, I’ve exported the complete list of modules from our internal Python library ent_pycore. This should help us during design and implementation of the circuit breaker for our top-priority LLM use case.
 
 Please find the attached/exported list for your reference. I recommend reviewing it so we can align on which functions to leverage as part of the circuit breaker logic, and avoid duplicating efforts.

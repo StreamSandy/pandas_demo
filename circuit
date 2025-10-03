@@ -1,3 +1,213 @@
+7:15
+>>>>>>>>>>>>>>>>
+
+Great start. Your prompt has the right intent (“design a circuit breaker using the in-house library + update tests + PR for review”), but it’s missing the scaffolding that lets a capable agent act deterministically: concrete inputs/outputs, constraints, acceptance criteria, and a step plan.
+
+Below I’ll (1) pinpoint the gaps, (2) give you a copy-paste upgraded prompt template tailored to your situation (ent_pycore + LLM circuit breaker), and (3) add a short checklist you can keep using across tasks.
+
+---
+
+# 1) What’s strong vs. what’s missing
+
+**Strong**
+
+* Clear objective: design a circuit breaker for a top-priority use case.
+* Mentions internal lib (`ent_pycore`) and existing 30+ scripts.
+* Requires tests and a review-ready output.
+
+**Missing / ambiguous**
+
+* No explicit input artifacts (where is the JSON, which repo branch?).
+* No target language/runtime/test framework versions.
+* No SLOs/thresholds (how to decide open/half-open/closed? which error taxonomy?).
+* No output format (PR layout, folders, filenames).
+* No acceptance criteria or evaluation plan (benchmarks, chaos tests, pass/fail).
+* No guardrails (observability, idempotency, config flags, rollback).
+* No UX/behavior definition during degrade mode.
+* No security/compliance constraints.
+
+---
+
+# 2) Copy-paste upgraded zero-shot instruction (fill the placeholders)
+
+> **Title:** Design & integrate an LLM circuit breaker using `ent_pycore` + test + PR
+> **Audience:** Staff/Principal-level agent; produce review-ready work, not notes.
+
+**Role & Mission**
+You are a senior backend engineer. Your job: design and implement a production-grade circuit breaker for our highest-priority use case using our internal library **`ent_pycore`**. You must integrate it into the existing codebase, add tests, and produce a review-ready PR.
+
+**Context**
+
+* We depend on an LLM Completion API for core user workflows. Outages/timeouts currently cause cascading failures and SLO breaches.
+* We have ~30 existing Python scripts in this repo that call the LLM.
+  `REPO:` `<link or path>` (branch: `<branch>`).
+* We have **JSON manifests** listing all available `ent_pycore` functions (module path, name, signature, docstring).
+  `ARTIFACTS:` `<path/to/functions_index.json>` `<path/to/any_additional.json>`
+  If runtime import of `ent_pycore` is not possible (e.g., distribution-style package), **work from the JSON** to map capabilities.
+
+**Top-Priority Use Case**
+LLM Completion call (sync path).
+
+* **Trigger:** user submit → backend → LLM.
+* **Pain:** timeouts/5xx spikes cause request storms and poor UX.
+* **Goal:** protect upstream and preserve UX via circuit breaker + graceful degrade.
+  Fill any details you need from code and manifests; where unknown, propose sensible defaults and call them out.
+
+**Non-Negotiable Requirements**
+
+* **Language/Runtime:** Python `X.Y`, pytest `Z`.
+* **Observability:** emit metrics/traces/logs for: state transitions, failure counts, rolling windows, short-circuits, half-open probes, fallback activations.
+* **Config:** thresholds/timeouts must be **configurable** (env or YAML), with sane defaults.
+* **Safety:** idempotent operations, no sensitive data in logs, follow org logging policy.
+* **Compatibility:** do not break existing public functions; add feature-flag `CB_ENABLED` default `false` (we’ll canary).
+* **Docs:** create/update a `README.md` and a runbook section.
+
+**Design Constraints & Targets**
+
+* **States:** Closed → Open → Half-Open with exponential backoff + jitter for re-probe.
+* **Trip policy:** open when any of:
+
+  * rolling error-rate ≥ **`ERROR_RATE_THRESHOLD`** over last **`N`** calls,
+  * consecutive failures ≥ **`CONSEC_FAILS`**,
+  * p95 latency ≥ **`P95_LATENCY_MS`** for **`M`** windows.
+* **Recovery:** allow **`K`** trial calls in Half-Open; if success-rate ≥ **`RECOVERY_RATE`**, close else re-open.
+* **Partitioning:** maintain breakers per **service + tenant (or API key)** to avoid noisy-neighbor effects.
+* **Fallbacks:** when open, do (in order):
+
+  1. return cached last-good response (if TTL valid),
+  2. route to a cheaper/backup model (configurable),
+  3. return a minimal “degraded” response with user-safe messaging.
+* **SLO alignment:** define & report: availability, p95 latency, error budget burn.
+
+**Inputs You Can Use**
+
+1. `functions_index.json` describing `ent_pycore` callable surface.
+2. Source tree under `<repo path>`.
+3. Test data samples under `<tests/data>` (or create fixtures if absent).
+
+**Tasks (do them in order)**
+
+1. **Inventory Mapping:** Parse the JSON and produce a table: module path, function name, signature, doc summary, probable category (metrics/timing/retries/circuit-breaker helpers). Identify the most relevant `ent_pycore` utilities for:
+
+   * rolling windows, counters, timers, atomic state, locks, monotonic time, retry/backoff, config.
+     If something is missing, propose minimal adapters.
+2. **Design Spec (short):**
+
+   * Architecture diagram (ASCII or Mermaid) showing call path and breaker boundaries.
+   * Config schema (`config/circuit_breaker.yml`) with defaults and comments.
+   * Error taxonomy (timeout, 429/5xx, connection errors) and which should count toward tripping.
+   * Observability plan (metrics names, labels, sampling for traces).
+3. **Implementation:**
+
+   * Add a `circuit_breaker/` module with a thin, reusable wrapper (`@with_circuit_breaker` or context manager) that integrates with `ent_pycore`.
+   * Wire it into the top-priority LLM call sites via dependency injection / wrapper.
+   * Respect feature flag `CB_ENABLED`.
+4. **Tests:**
+
+   * Unit tests for state transitions, thresholds, backoff/jitter, half-open probes, partitioning.
+   * Property-based or table-driven tests for rolling windows.
+   * Integration tests that simulate spike of timeouts/5xx and verify correct degrade behavior and metrics.
+   * Basic chaos test (loop: fail N% randomly) to validate stability and observability.
+5. **Docs & Ops:**
+
+   * Update `README.md` with quickstart, config, and examples.
+   * Add `RUNBOOK.md` section: how to flip the flag, safe rollback, and dashboard links.
+   * Provide a one-page PR description with risks and canary plan.
+
+**Deliverables (exact output format)**
+
+* `design/circuit_breaker_spec.md` (≤ 2 pages, includes thresholds table & Mermaid diagram)
+* `circuit_breaker/` Python module (well-documented)
+* Modified call sites under `<paths>` guarded by `CB_ENABLED`
+* `config/circuit_breaker.yml` (defaults + comments)
+* `tests/test_circuit_breaker_*.py` (pytest)
+* `docs/RUNBOOK.md#circuit-breaker`
+* **PR text** (markdown): summary, screenshots of metrics if possible, rollout plan, rollback plan.
+
+**Acceptance Criteria**
+
+* All tests pass in CI.
+* In a 5-minute fault-injection run (≥50% timeouts), breaker must:
+
+  * open within **X seconds** or **Y failed calls**,
+  * cap outbound calls to ≤ **RPS limit** while open,
+  * emit metrics: `cb_state{service,tenant}`, `cb_open_total`, `cb_short_circuits_total`, `cb_half_open_probe_total`, `cb_fallback_total`.
+* With `CB_ENABLED=false`, behavior is unchanged (backward compatibility).
+
+**Output Style**
+
+* Provide concise artifacts and code blocks.
+* Show rationale as **bulleted summaries only** (no raw chain-of-thought).
+* Where you make assumptions, call them out at the top of each file as `ASSUMPTIONS`.
+
+**If Something Blocks You**
+
+* If `ent_pycore` cannot be imported, operate solely from the JSON manifest and generate shims with TODOs.
+* If critical data is missing, propose defaults and proceed; list gaps in the PR.
+
+---
+
+### (Optional) Ready-to-use skeletons the agent can emit
+
+**Mermaid (architecture)**
+
+```mermaid
+flowchart LR
+Client-->App[App Service]
+App-->CB{Circuit Breaker}
+CB -->|Closed/Half-Open| LLM[LLM API]
+CB -.Open/Short-circuit.-> Fallback[Cache/Backup Model/Degraded]
+App-->Obs[Metrics/Tracing Logs]
+```
+
+**Example config (`config/circuit_breaker.yml`)**
+
+```yaml
+cb_enabled: false
+window_size: 100            # rolling window calls
+error_rate_threshold: 0.25  # 25%+ errors trip
+consecutive_failures: 10
+latency_p95_ms_threshold: 3000
+half_open_max_probes: 5
+recovery_success_rate: 0.8
+open_state_backoff_ms: [1000, 2000, 4000, 8000]  # with jitter
+partition_keys: ["service", "tenant"]
+fallbacks:
+  enable_cache: true
+  cache_ttl_s: 300
+  enable_backup_model: true
+  backup_model_name: "gpt-lite"
+```
+
+**Pytest outline**
+
+```python
+def test_trips_on_error_rate(...): ...
+def test_half_open_probes_and_reclose(...): ...
+def test_short_circuit_and_fallback_cache(...): ...
+def test_partitioning_isolated_states(...): ...
+def test_flag_off_is_noop(...): ...
+```
+
+---
+
+# 3) Quick quality checklist (use this every time)
+
+* Inputs specified (repo, branch, JSON paths)?
+* Runtime/toolchain versions fixed?
+* SLOs/thresholds defined & justified?
+* Error taxonomy + which count toward tripping?
+* Configurable with safe defaults? Feature flag?
+* Observability: metrics names, labels, traces, logs?
+* Tests: unit + integration + chaos; pass/fail criteria?
+* Canary & rollback plan documented?
+* Backward compatibility guaranteed?
+* Security & privacy logging rules respected?
+
+---
+
+If you want, paste your actual JSON manifest path + repo path and I’ll tailor the thresholds and emit a first pass of `config/circuit_breaker.yml`, the metrics schema, and a pytest starter file that matches your tree.
+
 
 5:44 PM
 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>

@@ -1,3 +1,392 @@
+
+5:44 PM
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+
+Great call — if `ent_pycore` is a *distribution* with many subpackages, you’ll want a sturdier scanner. Here’s a **drop-in upgraded script** with:
+
+* **Two scan modes**:
+
+  1. **Import mode (default)** — imports modules and uses `inspect` (fast, accurate signatures, but may run import side-effects).
+  2. **AST mode (`--ast`)** — parses `.py` files without importing (safer; signatures may be partial).
+* **Top-level package scan** (not just submodules).
+* **Public/private filtering** (hide names starting with `_` unless `--include-private`).
+* **Markdown + JSON outputs** (to stdout and optional files).
+* **Package metadata** (version, location, distribution name).
+* **Graceful error capture** per module.
+
+> Run: `python scan_ent_pycore.py`
+> Safer (no imports): `python scan_ent_pycore.py --ast`
+> Save files: `python scan_ent_pycore.py --json out.json --md out.md`
+
+---
+
+### `scan_ent_pycore.py`
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Scan a Python package (default: ent_pycore) and produce:
+- JSON inventory of modules, functions, classes, signatures, first-line docs
+- Markdown catalog (grouped by module)
+Supports two modes:
+  * Import-based inspection (default)
+  * AST-only scanning (--ast) without importing modules
+"""
+
+import argparse
+import importlib
+import inspect
+import json
+import os
+import pkgutil
+import sys
+import textwrap
+from dataclasses import dataclass, asdict
+from typing import List, Optional, Dict, Any
+
+# Python 3.8+: importlib.metadata is stdlib (fallback for older)
+try:
+    from importlib import metadata as ilmd  # type: ignore
+except Exception:
+    ilmd = None  # pragma: no cover
+
+@dataclass
+class Item:
+    name: str
+    kind: str  # "function" | "class"
+    signature: str
+    doc_head: str
+    defined_in: Optional[str] = None  # file path if known
+    line_no: Optional[int] = None
+
+@dataclass
+class ModuleReport:
+    module: str
+    error: Optional[str] = None
+    items: List[Item] = None  # type: ignore
+
+def get_package_metadata(pkg_name: str) -> Dict[str, Any]:
+    meta = {"package": pkg_name}
+    try:
+        mod = importlib.import_module(pkg_name)
+        meta["location"] = getattr(mod, "__file__", None)
+        meta["package_dir"] = os.path.dirname(meta["location"]) if meta["location"] else None
+    except Exception as e:
+        meta["import_error"] = repr(e)
+        return meta
+
+    # Distribution metadata (best-effort)
+    if ilmd is not None:
+        try:
+            # Some packages use different "distribution" names than import name
+            # Try direct match; if fails, scan distributions and match top-level files
+            dist_version = None
+            dist_name = None
+            try:
+                dist_version = ilmd.version(pkg_name)
+                dist_name = pkg_name
+            except Exception:
+                # fallback: pick first distribution whose files include the package directory name
+                for dist in ilmd.distributions():
+                    name = dist.metadata.get("Name") or dist.metadata.get("name")
+                    if not name:
+                        continue
+                    try:
+                        files = list(dist.files or [])
+                    except Exception:
+                        continue
+                    for f in files:
+                        parts = str(f).split("/")
+                        if parts and parts[0] == pkg_name:
+                            dist_name = name
+                            dist_version = dist.version
+                            break
+                    if dist_name:
+                        break
+            if dist_name:
+                meta["distribution"] = dist_name
+            if dist_version:
+                meta["version"] = dist_version
+        except Exception:
+            pass
+    return meta
+
+def should_keep(name: str, include_private: bool) -> bool:
+    if include_private:
+        return True
+    return not name.startswith("_")
+
+def doc_head(obj) -> str:
+    d = inspect.getdoc(obj) or ""
+    # First 1–2 lines (short)
+    lines = d.strip().splitlines()
+    return " ".join(lines[:2]).strip()
+
+def inspect_module(module, include_private: bool) -> List[Item]:
+    out: List[Item] = []
+    for n, obj in inspect.getmembers(module):
+        if not should_keep(n, include_private):
+            continue
+        if inspect.isfunction(obj) or inspect.isbuiltin(obj):
+            k = "function"
+        elif inspect.isclass(obj):
+            k = "class"
+        else:
+            continue
+        try:
+            try:
+                sig = str(inspect.signature(obj))
+            except Exception:
+                sig = "(signature unavailable)"
+            try:
+                srcfile = inspect.getsourcefile(obj) or inspect.getfile(obj)
+            except Exception:
+                srcfile = None
+            try:
+                _, lineno = inspect.getsourcelines(obj)
+            except Exception:
+                lineno = None
+            out.append(Item(
+                name=n,
+                kind=k,
+                signature=sig,
+                doc_head=doc_head(obj),
+                defined_in=srcfile,
+                line_no=lineno
+            ))
+        except Exception:
+            # Continue collecting even if one member fails
+            continue
+    return out
+
+def walk_import(pkg_name: str, include_private: bool) -> List[ModuleReport]:
+    reports: List[ModuleReport] = []
+
+    # Include the top-level package itself
+    try:
+        root = importlib.import_module(pkg_name)
+        items = inspect_module(root, include_private)
+        reports.append(ModuleReport(module=pkg_name, items=items))
+    except Exception as e:
+        reports.append(ModuleReport(module=pkg_name, error=repr(e), items=[]))
+
+    # Walk submodules
+    try:
+        root = importlib.import_module(pkg_name)
+        for m in pkgutil.walk_packages(root.__path__, root.__name__ + "."):
+            name = m.name
+            try:
+                mod = importlib.import_module(name)
+                items = inspect_module(mod, include_private)
+                reports.append(ModuleReport(module=name, items=items))
+            except Exception as e:
+                reports.append(ModuleReport(module=name, error=repr(e), items=[]))
+    except Exception as e:
+        # If __path__ is unavailable or walk fails
+        reports.append(ModuleReport(module=f"{pkg_name}.__walk__", error=repr(e), items=[]))
+
+    return reports
+
+# ---------- AST Mode (no import) ----------
+import ast
+
+class AstVisitor(ast.NodeVisitor):
+    def __init__(self, include_private: bool):
+        self.include_private = include_private
+        self.items: List[Item] = []
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        if should_keep(node.name, self.include_private):
+            sig = "(parameters unknown via AST)"
+            # best-effort build signature string
+            try:
+                params = []
+                for a in node.args.args:
+                    params.append(a.arg)
+                if node.args.vararg:
+                    params.append("*" + node.args.vararg.arg)
+                for a in node.args.kwonlyargs:
+                    params.append(a.arg)
+                if node.args.kwarg:
+                    params.append("**" + node.args.kwarg.arg)
+                sig = "(" + ", ".join(params) + ")"
+            except Exception:
+                pass
+            doc = ast.get_docstring(node) or ""
+            head = " ".join((doc.strip().splitlines() or [""])[:2]).strip()
+            self.items.append(Item(
+                name=node.name,
+                kind="function",
+                signature=sig,
+                doc_head=head,
+                defined_in=None,
+                line_no=getattr(node, "lineno", None)
+            ))
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef):
+        if should_keep(node.name, self.include_private):
+            # Constructors' signatures are not trivial from AST; omit
+            doc = ast.get_docstring(node) or ""
+            head = " ".join((doc.strip().splitlines() or [""])[:2]).strip()
+            self.items.append(Item(
+                name=node.name,
+                kind="class",
+                signature="(inspect via import for full signature)",
+                doc_head=head,
+                defined_in=None,
+                line_no=getattr(node, "lineno", None)
+            ))
+        self.generic_visit(node)
+
+def is_package_dir(path: str) -> bool:
+    return os.path.isdir(path) and os.path.isfile(os.path.join(path, "__init__.py"))
+
+def walk_ast(pkg_name: str) -> List[ModuleReport]:
+    # Locate the package directory by importing just to find __file__ (not executing submodules)
+    reports: List[ModuleReport] = []
+    try:
+        mod = importlib.import_module(pkg_name)
+        base_file = getattr(mod, "__file__", None)
+        if not base_file:
+            return [ModuleReport(module=pkg_name, error="Cannot locate package file", items=[])]
+        base_dir = os.path.dirname(base_file)
+    except Exception as e:
+        return [ModuleReport(module=pkg_name, error=f"Could not import root to locate files: {e!r}", items=[])]
+
+    # Walk the directory for .py files
+    for root, dirs, files in os.walk(base_dir):
+        # Respect package boundaries (skip hidden dirs, __pycache__)
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__"]
+        for f in files:
+            if not f.endswith(".py"):
+                continue
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, base_dir)
+            # Compute module name
+            modname_parts = [pkg_name] + rel[:-3].split(os.sep)  # strip .py
+            if modname_parts[-1] == "__init__":
+                modname_parts = modname_parts[:-1]
+            module_name = ".".join(modname_parts)
+
+            try:
+                with open(full, "r", encoding="utf-8") as fh:
+                    src = fh.read()
+                tree = ast.parse(src, filename=full)
+                visitor = AstVisitor(include_private=args.include_private)
+                visitor.visit(tree)
+                # attach file path for each item
+                for it in visitor.items:
+                    it.defined_in = full
+                reports.append(ModuleReport(module=module_name, items=visitor.items))
+            except Exception as e:
+                reports.append(ModuleReport(module=module_name, error=repr(e), items=[]))
+
+    return reports
+
+def to_markdown(meta: Dict[str, Any], reports: List[ModuleReport]) -> str:
+    header = [
+        f"# Package Catalog: `{meta.get('package', 'unknown')}`",
+        "",
+        f"- **Distribution**: {meta.get('distribution', 'unknown')}  ",
+        f"- **Version**: {meta.get('version', 'unknown')}  ",
+        f"- **Location**: {meta.get('package_dir', meta.get('location', 'unknown'))}",
+        "",
+        "---",
+        ""
+    ]
+    parts = ["\n".join(header)]
+    for rep in sorted(reports, key=lambda r: r.module):
+        parts.append(f"## Module: `{rep.module}`")
+        if rep.error:
+            parts.append(f"> ❗ Error: `{rep.error}`\n")
+            continue
+        if not rep.items:
+            parts.append("_No public functions/classes found._\n")
+            continue
+        parts.append("| Name | Kind | Signature | Doc (first line) | File | Line |")
+        parts.append("|------|------|-----------|------------------|------|------|")
+        for it in rep.items:
+            sig = it.signature.replace("|", "\\|")
+            doc = (it.doc_head or "").replace("|", "\\|")
+            file_disp = (it.defined_in or "").replace("|", "\\|")
+            line_disp = it.line_no if it.line_no is not None else ""
+            parts.append(f"| `{it.name}` | {it.kind} | `{sig}` | {doc} | {file_disp} | {line_disp} |")
+        parts.append("")  # spacing
+    return "\n".join(parts)
+
+def main(args):
+    pkg = args.package
+    meta = get_package_metadata(pkg)
+
+    if args.ast:
+        reports = walk_ast(pkg)
+    else:
+        reports = walk_import(pkg, include_private=args.include_private)
+
+    # Serialize JSON
+    j = {
+        "meta": meta,
+        "reports": [asdict(r) for r in reports],
+    }
+    json_text = json.dumps(j, indent=2)
+
+    # Build Markdown
+    md_text = to_markdown(meta, reports)
+
+    # Output to stdout
+    if not args.quiet:
+        print(json_text)
+
+    # Optional file saves
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as f:
+            f.write(json_text)
+    if args.md:
+        with open(args.md, "w", encoding="utf-8") as f:
+            f.write(md_text)
+
+    # If user only wants Markdown on stdout
+    if args.markdown_stdout:
+        sys.stdout.write(md_text)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Scan a Python package (default ent_pycore) and produce JSON/Markdown catalogs."
+    )
+    parser.add_argument("--package", "-p", default="ent_pycore", help="Package name to scan")
+    parser.add_argument("--ast", action="store_true",
+                        help="Use AST-only mode (no imports, safer, less precise signatures)")
+    parser.add_argument("--include-private", action="store_true",
+                        help="Include names starting with underscore")
+    parser.add_argument("--json", help="Path to save JSON output")
+    parser.add_argument("--md", help="Path to save Markdown output")
+    parser.add_argument("--markdown-stdout", action="store_true",
+                        help="Print Markdown catalog to stdout (in addition to JSON unless --quiet)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Do not print JSON to stdout")
+    args = parser.parse_args()
+    main(args)
+```
+
+---
+
+### Tips for big distributions
+
+* If importing submodules triggers heavy side-effects, use **`--ast`** first to get the structure without execution, then selectively re-run **without `--ast`** for the few modules you care about (use `--package ent_pycore.subpkg` to narrow scope).
+* For “namespace” packages or C-extensions, AST mode will skip compiled modules; import mode will list them (signatures may still be limited).
+
+---
+
+If you run this and share either **`out.json`** or **`out.md`**, I’ll turn it into:
+
+* a **Function Catalog**,
+* a **Category → Use Case** map,
+* and **production-ready recipes** (e.g., circuit breaker, retries/backoff, caching, telemetry hooks) using `ent_pycore`.
+
+
 2:11 PM
 >>>>>>>>>>>>>>>>>
 

@@ -1,0 +1,33 @@
+Improved Prompt (Zero-Shot Instruction)
+
+Role: You are a senior software engineer in a high-performing team. Think like a Google engineer or someone at a billion-dollar startup.
+
+Task: I will provide a priority LLM use case where we need to design and implement a circuit breaker to protect user workflows.
+
+What you must do:
+
+Analyze the Use Case: Identify reliability risks, failure modes, and user impact.
+
+Propose Circuit Breaker Design: State model (Closed/Open/Half-open), thresholds, recovery policy, fallbacks, and observability.
+
+Justify with STAR Reasoning: Explain Situation, Task, Actions, and Results (expected impact on SLOs).
+
+Draft Standup Communication: A concise 2–3 sentence update I can say in the standup to my team/managers. Must sound professional, outcome-focused, and impactful.
+
+Output Format:
+
+Section 1: Use Case Analysis
+
+Section 2: Circuit Breaker Design
+
+Section 3: STAR Rationale
+
+Section 4: Standup Update (short, ready-to-say)
+
+Constraints:
+
+Keep the design production-grade and reviewable.
+
+Frame everything in terms of reliability, scalability, and user impact.
+
+Standup update should be concise, clear, and highlight business value.

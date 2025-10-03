@@ -1,3 +1,207 @@
+
+
+awesome problem. here’s a sharper, production-ready way to brief a capable agent—plus a filled-in version for your two use cases, and a quick sanity checklist.
+
+# 1) what’s missing in your current prompt (and why it matters)
+
+* **Clear objective & scope**: say exactly what “done” looks like (PRs, tests, dashboards, runbook).
+* **Assumptions policy**: forbid clarifying questions; require the agent to state assumptions & proceed.
+* **Non-functional constraints**: SLOs, latency budgets, token/cost budgets, concurrency limits, PII/compliance.
+* **Observability & rollback**: metrics, alerts, chaos tests, feature flags, rollback steps.
+* **Testing matrix**: unit, integ, fault-injection, load, resilience.
+* **STAR narrative**: ask for an explicit Situation→Task→Action→Result write-up.
+* **Review criteria**: a checklist/rubric the PE team can use to accept/reject.
+* **Change safety**: canary plan, blast radius, and backout commands.
+
+---
+
+# 2) zero-shot instruction prompt (template)
+
+> copy/paste and fill <> where needed. this keeps the agent decisive and output-oriented.
+
+**ROLE & MINDSET**
+Act as a senior software engineer/SRE at a high-scale company. Do not ask questions. If information is missing, make conservative, clearly labeled assumptions and proceed.
+
+**OBJECTIVE**
+Design and implement a **circuit breaker** for the specified services to protect user experience, control LLM spend, and prevent cascading failures. Deliver production-grade code and an end-to-end plan.
+
+**CODEBASE CONTEXT**
+
+* Repo: `<org>/<repo>` (monorepo; primary languages: `<languages>`)
+* Services in scope: `<service names / paths>`
+* Environment: Dev/UAT/Prod with feature flags via `<flag system>`
+* Dependencies: LLM API `<provider(s)>`, DB `<type>`, queue `<type>`
+
+**CONSTRAINTS & SLOs**
+
+* User-facing latency P95 ≤ `<X ms>`; error budget `<Y %>` per 30 days
+* LLM spend: max `<tokens/min>` and `<$/day>`; shed load if exceeded
+* Timeouts: `<client timeout>`; retries: capped with exponential backoff + jitter
+* Concurrency caps: `<value>` per instance; global rate limit `<value>`
+* PII/compliance: no PII in logs; enable structured logging
+
+**DELIVERABLES**
+
+1. **Design doc** (≤2 pages) with: state machine, thresholds, fallback paths, backpressure, and recovery policy. Include Mermaid diagram.
+2. **Implementation**: PR(s) that add circuit breaker middleware/util(s) + configuration (env-driven).
+3. **Tests**: unit + integration + fault-injection (simulate timeouts, 5xx, time-window failure %).
+4. **Observability**: metrics names, dashboards, and alert rules.
+5. **Runbook**: ops steps, feature-flag toggles, rollback commands.
+6. **STAR** summary of the work (Situation, Task, Actions, Results).
+7. **Review note for PE**: risks, tradeoffs, and how to validate locally & in canary.
+
+**EVALUATION / ACCEPTANCE CRITERIA**
+
+* Breaker transitions correctly (Closed→Open→Half-Open) using rolling window failure rate or consecutive errors.
+* No request storms: retries are bounded, with jitter; concurrency & rate limits enforced.
+* For write-paths: durability guaranteed (queue + idempotency key); zero data loss on transient DB outage.
+* Observability: metrics and alerts fire in controlled chaos tests; dashboards show breaker state & rates.
+* Cost guardrails: breaker opens on spend spikes or token rate breach.
+* All tests pass; canary shows ≤ `<delta>` regression on latency/error rate.
+
+**PROCESS**
+
+* Make and list assumptions.
+* Produce: (a) design doc, (b) code diff, (c) tests, (d) ops assets, (e) STAR summary.
+* Output everything inline, with code blocks and filenames.
+
+---
+
+# 3) filled-in prompt for your two use cases
+
+**ROLE & MINDSET**
+Act as a senior SWE/SRE. Do not ask questions. If details are missing, assume safe defaults and record them.
+
+**IN-SCOPE USE CASES**
+A) **LLM Completion (read path)** – Core UX; timeouts/outages break workflows and burn error budget.
+B) **Feedback/Analytics Write (write path)** – Compliance/audit-critical; DB outages risk data loss.
+
+**OBJECTIVE**
+Design and implement circuit breakers for A & B that:
+
+* protect UX and SLOs,
+* cap cost & token usage,
+* prevent cascading failures,
+* preserve/queue writes and alert on failures.
+
+**CODEBASE**
+
+* Repo: `<org>/genai-platform`
+* Services: `api/llm_gateway` (TypeScript/Node) and `svc/telemetry_writer` (Python/FastAPI)
+* Env: Dev/UAT/Prod; feature flags via `FF_CIRCUIT_BREAKER_{LLM,WRITE}`
+
+**KEY CONSTRAINTS**
+
+* SLOs: P95 latency ≤ 1200 ms for LLM completions; monthly availability ≥ 99.9%
+* LLM budgets: ≤ 60k tokens/min per tenant; daily spend cap `<$>` configurable
+* Timeouts: upstream LLM 2.0 s; client 2.5 s; retry: max 2 with exp backoff (100–600 ms) + jitter
+* Concurrency: 64 per instance; global qps per tenant set via token bucket
+* DB writes: at-least-once via durable queue (e.g., SQS/Kafka) with idempotency keys
+* No PII in logs; trace with `trace_id`, `tenant_id`, `breaker_state`
+
+**DELIVERABLES**
+
+1. **Design doc** (≤2 pages) including Mermaid diagrams of both breakers.
+2. **Code**
+
+   * `api/llm_gateway`: CircuitBreaker middleware (Closed/Open/Half-Open), fallback: cached/template response for non-critical prompts, plus shed-load when cost/token budgets breach.
+   * `svc/telemetry_writer`: CircuitBreaker guarding DB client; on Open, enqueue to durable queue; consumer drains with idempotency & DLQ.
+3. **Tests**
+
+   * Unit: state transitions, rolling window failure %, budget gating, retry caps.
+   * Integration: fault-injection (LLM 5xx/timeout spikes; DB connection refused).
+   * Load/chaos: verify alerts, ensure no thundering herd, measure P95.
+4. **Observability** (Prometheus/Grafana or equivalent)
+
+   * Metrics: `breaker_state{service}`, `breaker_open_total`, `failure_rate`, `timeout_total`, `retry_total`, `queued_writes`, `dlq_depth`, `token_rate`, `spend_rate_usd_per_min`
+   * Alerts:
+
+     * LLM: breaker Open > 1 min OR failure_rate ≥ 50% over 2 min OR token_rate/spend breach for 3 consecutive mins.
+     * Writes: queue lag > 2 min OR DLQ depth > 0 OR Open > 30 s.
+5. **Runbook**: flag toggles, raising limits, draining DLQ, recovering DB, backout steps.
+6. **STAR**: concise narrative of the problem and results.
+7. **PE Review Note**: risk, tradeoffs (e.g., hedging cost vs latency), and validation commands.
+
+**ACCEPTANCE CRITERIA**
+
+* LLM: Under induced 50% upstream failure for 2 min, breaker opens within 5–10 s, caps retries, P95 ≤ 1.5× baseline, error rate ≤ budget, spend spike is contained.
+* Writes: On DB outage for 5 min, 0 lost records; queue builds then drains to 0 within 10 min post-recovery; duplicates suppressed via idempotency key.
+* All tests pass; dashboards accurate; alerts verified in chaos runs.
+
+**OUTPUT FORMAT**
+Produce in this order:
+
+1. Assumptions list
+2. Design doc (with Mermaid diagrams)
+3. Code diffs (filenames + code blocks)
+4. Test code & how to run
+5. Observability spec (metrics, dashboards JSON if applicable)
+6. Runbook & rollback
+7. STAR summary
+8. PE review checklist mapping
+
+---
+
+# 4) pocket designs (for the agent to implement)
+
+**LLM breaker (TypeScript sketch)**
+
+```ts
+// api/llm_gateway/middleware/circuitBreaker.ts
+type State = "CLOSED" | "OPEN" | "HALF_OPEN";
+export function createBreaker(opts: {
+  failureThresholdPct: number; // e.g., 50 over window
+  windowSecs: number;          // e.g., 20
+  openCooldownMs: number;      // e.g., 5000
+  halfOpenProbe: number;       // e.g., 5 requests
+  maxRetries: number;          // e.g., 2 w/ jittered backoff
+  tokenBudgetPerMin: number;   // per-tenant
+  spendBudgetPerMinUSD: number;
+}) { /* implement rolling counters, budgets, and state machine */ }
+```
+
+**Write-path breaker + queue (Python sketch)**
+
+```python
+# svc/telemetry_writer/breaker.py
+class CircuitBreaker:
+    # CLOSED -> OPEN (on failure rate or consecutive errors)
+    # OPEN -> HALF_OPEN after cooldown
+    # HALF_OPEN -> CLOSED on probe success; else OPEN
+    ...
+# On OPEN: push record to durable queue with idempotency_key = sha256(tenant_id|event_id|ts)
+# Consumer: reads queue, writes with upsert on idempotency_key; on permanent failure -> DLQ.
+```
+
+**Mermaid (example)**
+
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN: failure_rate>=threshold OR budget_breach
+    OPEN --> HALF_OPEN: cooldown elapsed
+    HALF_OPEN --> CLOSED: probeSuccess>=N
+    HALF_OPEN --> OPEN: probeFailure>0
+```
+
+---
+
+# 5) review checklist (paste into PR)
+
+* [ ] Assumptions documented; no open questions.
+* [ ] Breaker thresholds, windows, cooldowns are config-driven.
+* [ ] Retries capped + jitter; no unbounded fan-out.
+* [ ] Cost/token budgets enforced; load-shedding in place.
+* [ ] Write-path durability: queue, idempotency, DLQ; zero data loss in tests.
+* [ ] Metrics/alerts wired; dashboards render breaker state & lag.
+* [ ] Chaos/fault-injection scripts included; alerts verified.
+* [ ] Feature-flagged; canary & rollback steps documented.
+
+If you want, I can now generate the exact design doc + code stubs + tests following this prompt format.
+
+
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
 Awesome brief. Here’s a battle-tested, zero-shot prompt you can drop into your agent—plus add-ons and a tiny example of the expected answer shape. It’s written to elicit Google-level design depth without forcing the model to reveal private reasoning.
 
 ---

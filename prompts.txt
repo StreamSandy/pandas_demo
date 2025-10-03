@@ -1,3 +1,6 @@
+"Hey team! Just to give a quick update: I'm currently designing a circuit breaker for our supervisor code to handle our top-priority LLM use case. I've identified the key use cases we need to cover and mapped out how we can leverage our internal ent_pycore library functions for that. I'm finalizing the code design based on those internal libraries, and I’ve exported a list of all the relevant functions to share with you all. So right now, I'm in the middle of coding it out and should have something concrete soon. Thanks!"
+
+>>>>>>>>>>>>>>>>>>>
 Improved Prompt (Zero-Shot Instruction)
 
 Role: You are a senior software engineer in a high-performing team. Think like a Google engineer or someone at a billion-dollar startup.

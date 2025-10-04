@@ -1,3 +1,158 @@
+8:00 PM
+>>>>>>>>>>>>>>>
+
+Awesome—here’s a tight, copy-paste-ready **zero-shot prompt** you can give to the “most capable agent.” It forces runnable code, tests, and docs, all **under `src/temp/livetest`**, to A/B test your circuit breaker **before vs after** via FastAPI on localhost.
+
+---
+
+# Zero-Shot Prompt — FastAPI “Before vs After” Circuit Breaker (localhost, under `src/temp/livetest`)
+
+**Role**
+Act as a Staff/Principal backend & platform engineer. Ship minimal, production-grade, fully runnable code with tests and docs.
+
+**Context**
+We’re evaluating a Python **circuit breaker (CB)** for an LLM API call. Current usage pattern in our app:
+
+```python
+cb = CircuitBreaker(fail_max=5, reset_timeout=60, success_threshold=2)
+
+def call_llm_api(...):
+    return cb.call(llm_api, ...)
+```
+
+We need a **dummy FastAPI service** to compare behavior **before (no CB)** vs **after (with CB)** on **localhost**.
+
+**Hard constraints**
+
+* **All files must live under:** `src/temp/livetest/...` (use these exact paths).
+* Use **FastAPI + uvicorn**.
+* **Do not** use any third-party circuit-breaker libraries. Implement a small CB that mirrors the above semantics (Closed → Open → Half-Open with `fail_max`, `reset_timeout`, `success_threshold`).
+* Keep dependencies minimal (FastAPI, pydantic, httpx (if needed), prometheus-client (optional), pytest).
+* Python **3.10+**. No ellipses in code; provide complete files.
+
+**What to build**
+
+1. **Endpoints**
+
+   * `GET /v1/before/complete` → calls simulated upstream **without** CB (control).
+   * `GET /v1/after/complete` → same call **with** CB.
+   * `GET /simulate/upstream` → simulated upstream that can:
+
+     * return success,
+     * return 5xx,
+     * or timeout/sleep.
+       Control via query params or ENV: `fail_rate` (0.0–1.0), `consec_fail` (int), `timeout_ms` (int).
+   * `GET /cb/state` → JSON with `state` (`closed|open|half_open`), counters (attempts/success/failure/opens), timestamps.
+   * `GET /healthz` → 200 OK.
+   * `GET /metrics` → Prometheus metrics (optional but preferred).
+
+2. **Config (ENV with sane defaults)**
+
+   * `CB_FAIL_MAX=5`, `CB_RESET_TIMEOUT=60`, `CB_SUCCESS_THRESHOLD=2`
+   * `UPSTREAM_FAIL_RATE=0.0`, `UPSTREAM_CONSEC_FAIL=0`, `UPSTREAM_TIMEOUT_MS=0`
+   * `SERVER_HOST=127.0.0.1`, `SERVER_PORT=8080`
+   * Respect ENV → .env → defaults precedence (simple, documented).
+
+3. **Code organization (exact paths)**
+
+```
+src/temp/livetest/requirements.txt
+src/temp/livetest/requirements-dev.txt            # optional (pytest, coverage, ruff/black)
+src/temp/livetest/app/__init__.py
+src/temp/livetest/app/config.py
+src/temp/livetest/app/circuit_breaker.py
+src/temp/livetest/app/upstream.py
+src/temp/livetest/app/main.py
+src/temp/livetest/tests/test_cb_api.py
+src/temp/livetest/Makefile
+src/temp/livetest/README.md
+src/temp/livetest/.env.example
+# Optional:
+# src/temp/livetest/Dockerfile
+# src/temp/livetest/pyproject.toml (ruff/black), mypy.ini
+```
+
+4. **Circuit breaker requirements (must)**
+
+   * States: **Closed → Open → Half-Open**.
+   * **Open** on either `fail_max` consecutive failures **or** (if you implement rate windows) an error rate threshold—choose one consistent policy and document it (default: consecutive failures only).
+   * **Half-Open** allows limited probes; **Close** after `success_threshold` consecutive successes; otherwise **Open** again.
+   * Thread/process-safe state changes (use locks for shared state).
+   * Optional bounded retry with jitter **only** inside the “after” path; avoid retry storms; document the policy.
+   * Structured JSON logs for state transitions (no secrets/PII).
+   * Minimal, low-cardinality Prometheus metrics if `/metrics` is included.
+
+5. **Tests (pytest)**
+
+   * Use FastAPI TestClient or httpx AsyncClient.
+   * Cover:
+
+     * Success path (no failures).
+     * Failing upstream: breaker **opens** by/before `fail_max`.
+     * Cool-down elapses → **half-open**; on `success_threshold` successes → **closed** again.
+     * Timeout behavior vs explicit 5xx.
+     * `/cb/state` accuracy.
+     * (Nice-to-have) simple concurrency test (parallel calls) showing safe transitions.
+   * Include coverage run (target ≥ **85%** for CB module).
+
+6. **Dev UX (localhost)**
+
+   * `Makefile` targets: `run`, `test`, `lint`, `fmt`, `coverage`.
+   * `README.md` quickstart for **localhost only** (no Docker required), plus optional Docker instructions.
+   * Example `curl` commands to trigger scenarios:
+
+     * random failures: `curl 'http://127.0.0.1:8080/v1/after/complete?fail_rate=0.7'`
+     * consecutive failures then success: `...&consec_fail=5`
+     * timeouts: `...&timeout_ms=1200`
+   * Show how to read `/cb/state` and `/metrics`.
+
+**Acceptance criteria**
+
+* With `UPSTREAM_CONSEC_FAIL=5`, calling `/v1/after/complete` opens the breaker **by/before the 5th failure**, stays **open** for `CB_RESET_TIMEOUT` seconds, then transitions to **half-open**.
+* During **half-open**, after `CB_SUCCESS_THRESHOLD` successful probes, the breaker **closes**.
+* `/v1/before/complete` reflects raw upstream behavior (control).
+* `/cb/state` returns correct state & counters; logs include transition entries.
+* `pytest` passes locally; coverage target met.
+* Service runs on **[http://127.0.0.1:8080](http://127.0.0.1:8080)** with `make run` or the README command.
+
+**Output format (strict; in this order)**
+
+1. **Project tree** (exact paths rooted at `src/temp/livetest/`)
+2. `requirements.txt` (+ optional `requirements-dev.txt`)
+3. `app/config.py`
+4. `app/circuit_breaker.py`
+5. `app/upstream.py`
+6. `app/main.py`
+7. `tests/test_cb_api.py` (and any helpers)
+8. `Makefile`
+9. `README.md`
+10. `.env.example`
+11. *(Optional)* `Dockerfile` and any lint/format config
+
+> Provide **full file contents** for each (no placeholders or ellipses).
+
+**House rules**
+
+* No new complex deps; keep it lean.
+* Small, readable functions; docstrings + type hints.
+* Consistent logging format; redact sensitive values.
+* If you must make an assumption, **state it in README** and proceed.
+
+**Starter defaults (use unless overridden)**
+
+* `CB_FAIL_MAX=5`, `CB_RESET_TIMEOUT=60`, `CB_SUCCESS_THRESHOLD=2`
+* `SERVER_HOST=127.0.0.1`, `SERVER_PORT=8080`
+
+---
+
+## Bonus (things “a Google-level engineer” wouldn’t miss)
+
+* Clear **state transition diagram** (Mermaid) in the README.
+* **Alerting ideas** for `/metrics`: breaker flapping, open too long.
+* **Operational switches**: env flag to disable CB, and a safe default when config is absent.
+* Minimal **security hygiene**: no secrets in logs; avoid high-cardinality labels; validate/limit user-supplied params.
+
+Want me to generate the **reference code** for this prompt next so you can run it immediately?
 
 6:50PM
 >>>>>>>>>>>>>>>>>>>>>.

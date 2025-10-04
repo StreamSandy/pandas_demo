@@ -1,3 +1,120 @@
+
+
+11:00 pm
+>>>>>>>>>>>>>>>>>>>>
+
+Love it. Here’s a copy-paste, battle-tested zero-shot prompt that makes a top agent produce a step-by-step, code-anchored explainer of every circuit breaker in your repo—covering design, failure detection, fallbacks, observability, edge cases, and PE-grade recommendations.
+
+⸻
+
+Zero-Shot Prompt — “Explain Every Circuit Breaker in Our Codebase (Step-by-Step, PE-Ready)”
+
+Role
+Act as a Staff/Principal engineer at a billion-dollar startup: concise, accurate, SRE-aligned, and documentation-first.
+
+Context
+	•	We use an in-house circuit breaker pattern (e.g., CircuitBreaker(fail_max=5, reset_timeout=60, success_threshold=2)), possibly via ent_pycore or local equivalents.
+	•	Codebase layout: src/ (code), tests/ (pytest).
+	•	Primary files likely include src/circuit_breaker.py and call sites across services/clients.
+	•	Objective: explain, not redesign—produce a precise, code-referenced walkthrough of how each breaker works, how failure is detected, and what the fallback is.
+
+Inputs You Can Assume
+	•	Repo root: <<REPO_ROOT>> (default: current working tree)
+	•	Key modules: <<PRIMARY_FILES_OR_GLOBS>> (e.g., src/**/circuit_breaker*.py, src/**/*client*.py, src/**/*service*.py)
+	•	Runtime config sources in order of precedence (override if code differs): ENV → config file → code defaults.
+	•	If ent_pycore is a distribution/namespace, use AST + safe import guards to find its exported CB pieces.
+
+Task
+Produce a single Markdown report that explains every circuit breaker instance and its behavior, with code pointers and runnable reproductions.
+
+Method (required)
+	1.	Discover all CBs
+	•	Statically (AST) find CircuitBreaker(...) and wrappers; include custom factories or decorators.
+	•	For each instance, resolve thresholds/timeouts/success criteria and where they come from (ENV, config, defaults).
+	2.	Trace usage
+	•	Build a concise call graph from entrypoint → CB → upstream dependency (e.g., LLM API).
+	•	Note sync vs async, thread/process safety, and whether the breaker is per-dependency or global.
+	3.	Explain behavior step-by-step
+	•	Show state machine (Closed → Open → Half-Open), with what triggers transitions (consecutive failures vs error-rate window), and timers (cool-down/reset).
+	•	Clarify what counts as “failure”: exception types, status codes, timeouts, circuit open rejections.
+	•	Describe fallbacks (cached value, degraded response, null-object, fast-fail with user-friendly message).
+	4.	Observability mapping
+	•	List emitted metrics/logs/traces, names & labels; sample queries (Prometheus) and suggested alerts (flapping, open too long, probe failures).
+	5.	Edge cases & hazards
+	•	Double-wrapping, async + blocking mix, global state, multi-process workers, config hot-reload, high-cardinality metrics, retry storms.
+	6.	Mini reproduction harness
+	•	Provide simple, runnable code snippets or pytest examples that trigger: normal success, consecutive failures to Open, Half-Open probe success/fail, timeout path.
+	7.	Prioritized recommendations
+	•	P0/P1 suggestions to harden behavior, improve observability, or fix pitfalls—without changing public APIs unless strongly justified.
+
+Output Format (strict, in order)
+	1.	# Executive Summary
+	•	One paragraph: how many CBs found, where, and headline risks or confidence level.
+	2.	# Inventory of Circuit Breakers (table)
+
+ID	Module:Line	Breaker Var	Upstream/Callsite	Policy (fail_max / reset_timeout / success_threshold)	Failure Signals Counted	Fallback
+
+
+
+	3.	# State Machine & Semantics
+	•	Mermaid stateDiagram-v2 with transitions & timers.
+	•	Bulleted rules for what opens/closes; how Half-Open probes work; what’s ignored (e.g., 4xx vs 5xx).
+	4.	# Per-Breaker Deep Dive (repeat per CB instance)
+	•	Path & code refs: src/.../file.py:L123 (show small, focused snippet).
+	•	Config resolution: ENV keys, config keys, defaults; resolved effective values.
+	•	Call flow (Mermaid sequence diagram) from endpoint/function → CB → upstream.
+	•	Failure taxonomy: exceptions/status codes/timeouts that trip the CB.
+	•	Fallback behavior: exact return shape/examples; user impact.
+	•	Concurrency model: thread/process safety notes; async peculiarities.
+	•	Instrumentation: metric/log names & sample entries.
+	5.	# Reproduction Recipes
+	•	Pytest examples (or curl/script) to demonstrate:
+	•	normal path,
+	•	N consecutive failures → Open,
+	•	cool-down → Half-Open,
+	•	success_threshold successes → Closed,
+	•	timeout vs error differentiation.
+	•	Show expected outputs and /cb/state (if available).
+	6.	# Observability & Alerting
+	•	Metrics list, low-cardinality labels, example PromQL (or pseudo):
+	•	open duration SLI, state transition counter, probe success rate.
+	•	Alert sketches: breaker flapping, breaker stuck Open, sudden rise in open rejections.
+	7.	# Edge Cases & Known Gaps
+	•	E.g., double wrap, per-tenant breakers, retries causing thundering herd, multi-worker desync.
+	8.	# Recommendations (P0/P1/P2)
+	•	Actionable, scoped changes; risk & effort notes; suggested owners.
+	9.	# Appendix
+	•	AST/grep queries used, config key map, longer code excerpts if needed.
+
+Acceptance Criteria
+	•	Every circuit breaker in the codebase is listed with module:line references and resolved config values.
+	•	Clear, step-by-step narrative of how failure is detected and exactly what fallback returns.
+	•	Includes state diagram + sequence diagrams, runnable reproduction snippets, and concrete alert ideas.
+	•	Uses precise language (no vague “may/should” unless truly unknown; then call it out as an assumption).
+	•	No third-party CB design theory unless tied back to our code.
+
+House Rules
+	•	Be concise but specific. Quote only the minimal code needed to explain.
+	•	Do not expose secrets; keep example logs/metrics PII-safe.
+	•	If something is unknown or inferred, label it “Assumption” and proceed.
+
+Optional Inputs (fill if known)
+	•	<<ENV_KEYS>> for CB config (e.g., CB_FAIL_MAX, CB_RESET_TIMEOUT, CB_SUCCESS_THRESHOLD).
+	•	<<UPSTREAMS>> names and SLIs/SLOs to anchor recommendations.
+	•	Whether the repo exposes /cb/state//metrics; if not, note how to emulate.
+
+⸻
+
+Pro tips to strengthen your prompt even more
+	•	Pin scope: add explicit file globs or entrypoints the agent must analyze.
+	•	Give SLOs: target success rate/latency/error budget window to contextualize fallbacks.
+	•	Name env keys: so config resolution is deterministic.
+	•	Ask for risk-ranked recos with estimated effort (S/M/L) to help prioritization.
+	•	Require runnable recipes: reviewers can verify behavior in minutes.
+
+If you want, paste your repo paths and ENV keys and I’ll pre-fill the placeholders for you.
+
+
 8:00 PM
 >>>>>>>>>>>>>>>
 

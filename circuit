@@ -1,3 +1,176 @@
+10:58 PM /06oct
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+Got it—your current prompt has the right intent, but it’s a bit open-ended and leaves the agent guessing about scope, artifacts, and what “good” looks like. Below is a tighter, drop-in **zero-shot instruction template** you can paste into your runbook. It bakes in: clear goals, strict outputs, “before/after” diffs with *line-level* commentary, explicit references to `ent_pycore.circuit_breaker`, realistic data walkthroughs, tests, and a self-audit checklist “like a Google engineer.”
+
+---
+
+# Upgraded Zero-Shot Instruction (copy/paste)
+
+## Role
+
+You are a **principal-level software engineer** improving reliability for an LLM backend. Think rigorously, justify trade-offs, and produce production-ready code and tests.
+
+## Context
+
+* We have an internal library **`ent_pycore`** with a module **`circuit_breaker.py`** (source code is provided in this task).
+* Our service code lives in a repo with `src/` and `tests/`.
+* File to modify: **`src/agent.py`** (LLM calling logic).
+* Goal: Add a robust **circuit breaker** around calls to external LLM APIs using **`ent_pycore.circuit_breaker`**.
+
+## Inputs (you will be given)
+
+1. The current `src/agent.py`.
+2. The raw source of `ent_pycore/circuit_breaker.py`.
+3. Execution environment constraints (Python version, framework, logging).
+4. Any repo conventions (lint/format/test commands).
+
+## Deliverables
+
+1. **Design brief (≤1 page)**
+
+   * Why a circuit breaker here, failure modes, chosen config (fail threshold, reset timeout, success threshold), fallback strategy, observability.
+2. **Code changes**
+
+   * A **Before/After diff** for *each changed file* with **line-by-line explanations** of what the code does and why.
+   * New/modified files must include header comments showing ownership, docstrings, and links if applicable.
+3. **APIs used from `ent_pycore.circuit_breaker`**
+
+   * List the exact classes/functions you used; for each, include signature, parameters, return types, and how/where they’re invoked.
+4. **Real-time data walkthrough** *(mandatory)*
+
+   * Walk through a realistic call sequence showing state transitions (**CLOSED → OPEN → HALF_OPEN → CLOSED**), with concrete example values: timestamps, counters, latency (ms), exceptions (e.g., `TimeoutError`, HTTP 500), and fallback payloads.
+   * For every non-trivial line you changed or added, state: **(a)** what data the line sees at runtime, **(b)** expected side-effects, **(c)** how errors propagate or are suppressed.
+5. **Test plan & tests**
+
+   * Unit tests: normal path, repeated failures opening the breaker, backoff/reset, HALF_OPEN probe success/failure, metrics/log assertions, fallback path.
+   * Include **table-driven tests** and one **property-based** check for idempotence or retry limits.
+   * Provide commands to run locally (`pytest -q`) and expected outputs.
+6. **Operational readiness**
+
+   * Metrics (list exact metric names, labels), logs (message templates), alerts (firing conditions), config toggles/env vars, and safe defaults.
+   * Rollout plan + rollback guardrails.
+7. **Risks & mitigations (concise)**
+
+   * E.g., false opens under intermittent timeouts, thundering herd on HALF_OPEN, metric cardinality bloat—plus mitigations.
+
+## Circuit Breaker Requirements
+
+* **States**: `CLOSED`, `OPEN`, `HALF_OPEN`.
+* **Config (defaults unless overridden by env):**
+
+  * `fail_max`: 5 consecutive failures to OPEN
+  * `reset_timeout`: 60s before HALF_OPEN
+  * `success_threshold`: 2 successful probes to return to CLOSED
+  * **Failure classification**: count `TimeoutError`, 5xx HTTP, `RateLimitError`; exclude 4xx except 429.
+* **Fallback**: Return a safe degraded response: `{"text":"Service temporarily unavailable","mode":"degraded","request_id":<uuid>}` and set `X-CB-State` header in server responses when applicable.
+* **Observability**:
+
+  * Counters: `cb_failures_total{call="llm"}`, `cb_fallback_total{call="llm"}`
+  * Gauges: `cb_state{call="llm"}` (0=CLOSED,1=OPEN,2=HALF_OPEN)
+  * Histograms: latency of upstream call and fallback path
+  * Logs: structured JSON with `cb_state`, `fail_count`, `cooldown_remaining_ms`, `request_id`.
+
+## Tasks
+
+1. **Audit** `agent.py` call path(s) to the LLM. Identify exact call sites, retries, and timeouts. Remove duplicate retry logic if the breaker already handles it (avoid retry storms).
+2. **Integrate** the breaker from `ent_pycore.circuit_breaker`:
+
+   * Instantiate with explicit config + env overrides.
+   * Wrap only the *outer* LLM call (not individual lower-level sockets).
+   * Implement a **single** fallback function that is fast, deterministic, and observable.
+3. **Thread-safety**: Ensure the breaker instance is shared appropriately (module-level singleton or DI container) without cross-tenant bleed if multi-tenant.
+4. **Idempotency**: Do not change side effects for already-sent upstream requests on fallback.
+5. **Backpressure**: When OPEN, short-circuit immediately—do **not** queue.
+6. **Half-open probes**: Limit concurrent probes (e.g., semaphore or built-in limiter if available).
+
+## Output Format (strict)
+
+Return a single Markdown document with these sections (in order):
+
+1. **Summary**
+2. **Design Brief**
+3. **Changed Files (Diff + Line-by-Line Explanations)**
+
+   * For each file: *Before/After* fenced code blocks, then an **Explanation Table** with columns: `Line`, `Runtime Data Example`, `Behavior`, `Why`.
+4. **ent_pycore APIs Used** (signatures + rationale)
+5. **Real-Time Data Walkthrough** (state timeline with concrete values)
+6. **Test Plan & Commands** (include code)
+7. **Operational Readiness** (metrics/logs/alerts/config)
+8. **Risks & Mitigations**
+9. **Appendix: Config & Env Vars**
+
+## Self-Audit Checklist (fail the task if any box unchecked)
+
+* [ ] Every non-trivial changed line has a **runtime data example**.
+* [ ] All breaker states and transitions are demonstrated with timestamps.
+* [ ] Fallback path validated with tests and metrics.
+* [ ] `ent_pycore` APIs referenced with exact signatures and links to code sections provided.
+* [ ] Diff compiles; `pytest -q` passes locally.
+
+## Style & Constraints
+
+* Pythonic, typed where useful; clear docstrings.
+* Avoid hidden global state and double retries.
+* Keep public behavior backward compatible unless justified.
+
+---
+
+## Mini Example: What the “Real-Time Data Walkthrough” Should Look Like
+
+**Timeline (excerpt):**
+
+* `t=00:00.000` State=CLOSED, `fail_count=0`. Call `llm()` → **TimeoutError @ 3000ms** → record failure (1/5).
+* `t=00:00.120` CLOSED (4 more failures: HTTP 502, 500, 500, 429) → reaches 5/5 → **transition to OPEN**.
+* `t=00:00.650` OPEN: next request short-circuited in **~1ms**, fallback returns `{"mode":"degraded"}`; metrics: `cb_fallback_total++`.
+* `t=00:60.700` After `reset_timeout=60s`, allow **HALF_OPEN** single probe; probe succeeds twice under `success_threshold=2` → **back to CLOSED**.
+
+**Line-by-line example (for a changed line):**
+
+* `resp = cb.call(lambda: llm_client.complete(prompt, timeout=2.5))`
+
+  * *Runtime data*: `prompt_len=224`, `timeout=2.5s`, `cb_state=HALF_OPEN`, `trial=1/2`
+  * *Behavior*: executes guarded call; if success → `success_count++`; if failure → `OPEN` again
+  * *Why*: ensure controlled probe during recovery; prevents stampedes.
+
+---
+
+## “Like a Google Engineer” Enhancements (baked in)
+
+* Explicit **acceptance criteria**, **observability**, and **rollback** plan.
+* **Failure taxonomy** documented; **cardinality-safe** metrics.
+* Clear **ownership** in file headers and PR description template.
+* **Risk table** with quantified blast radius and detection channels.
+
+---
+
+# Ultra-Concise Variant (for quick runs)
+
+**Goal:** Add `ent_pycore.circuit_breaker` around LLM calls in `src/agent.py`.
+
+**Do:**
+
+* Provide **Before/After** diffs with **line-level runtime examples**.
+* Show state transitions with timestamps & counters.
+* List `ent_pycore` APIs used (signature + where/how).
+* Add unit tests: open/close/half-open/fallback/metrics.
+* Output sections: Summary, Diffs+Explanations, APIs Used, Walkthrough, Tests, Ops, Risks.
+
+**Breaker Defaults:** `fail_max=5`, `reset_timeout=60s`, `success_threshold=2`. Failures = timeout, 5xx, 429. Fallback returns deterministic degraded payload.
+
+**Fail the task if:** any changed line lacks a runtime example or tests don’t cover fallback and HALF_OPEN.
+
+---
+
+# Why this is better
+
+* **Removes ambiguity** (explicit inputs, outputs, and config).
+* **Forces concrete reasoning** (line-level runtime data + state timeline).
+* **Operationalizes** the work (metrics/logs/alerts/rollout).
+* **Testable** (clear cases + commands).
+* **Review-ready** for PEs (diffs + rationale).
+
+If you want, I can tailor this to your exact `agent.py` and a sample `ent_pycore.circuit_breaker` signature you’re using.
+
 
 
 11:00 pm

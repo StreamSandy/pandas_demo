@@ -1,3 +1,239 @@
+7:45 AM /12-oct:
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+Awesome—this is a strong start. Below is a tightened, production-grade zero-shot instruction prompt you can paste into your agent, plus a compact acceptance checklist, output schemas, and a minimal example wrapper signature/pseudocode so the agent has zero ambiguity.
+
+---
+
+# Improved zero-shot instruction prompt (v1.0)
+
+**Role & Context**
+You are a Senior Platform Engineer embedded in our LLM platform team. Our org ships Python services that already depend on our internal library `ent_pycore`. The only allowed implementation for circuit breaking is the code and public APIs already present in `ent_pycore/circuit_breaker.py`. Do **not** introduce new third-party circuit-breaker libs.
+
+**Primary Objective**
+Design and integrate a circuit breaker for the highest-priority use case(s) listed under **Use Cases**, using only the enterprise logic available in `ent_pycore/circuit_breaker.py`. Wrap the breaker usage in a reusable function that accepts a callback (chain-invoke style). Fetch breaker parameters from MongoDB, support a **manual open/close override**, and ensure the **half-open** state uses **exponential backoff** with jitter.
+
+**Inputs Provided**
+
+* Source repo structure: `src/`, `tests/` (30+ scripts).
+* Internal library file: `ent_pycore/circuit_breaker.py` (the single source of truth).
+* List of modules referencing circuit-breaker behavior (you will analyze these).
+* **Use Cases** (fill these in):
+
+  ```
+  << USE_CASES_GO_HERE >>
+  ```
+
+**Hard Requirements (from Principal Engineer)**
+
+1. Provide a wrapper that can be called like chain-invoke, e.g. `invoke_with_cb(name, callback, *args, **kwargs)`.
+2. All breaker parameters (`fail_max`, `reset_timeout`, `success_threshold`, backoff settings, etc.) must be loaded from **MongoDB** at call time (with sensible caching) and support **manual override** (`open`/`closed`/`auto`).
+3. **Half-open** must use **exponential backoff** (with jitter) before trial calls; on failure in half-open, increase backoff; on success reaching `success_threshold`, close the breaker.
+
+**Design Constraints**
+
+* Use only `ent_pycore/circuit_breaker.py` public APIs. If a needed hook isn’t public, propose a minimal, safe change there (with before/after diff).
+* Thread-safe and async-safe (where applicable).
+* Minimal overhead; avoid global state; support multi-tenant keys (e.g., by breaker `name`).
+* Observability: emit logs and metrics for state transitions, open/close counts, backoff delays, and fallback invocations.
+* Error taxonomy: distinguish remote timeouts, 5xx, rate-limits, and client errors; only count **retriable** failures against the breaker.
+
+**MongoDB Schema (authoritative)**
+Collection: `cb_configs`
+Document key: `{ name: <string> }`
+Example document:
+
+```json
+{
+  "name": "llm.completions",
+  "mode": "auto",                // "auto" | "open" | "closed"
+  "fail_max": 5,
+  "reset_timeout_seconds": 60,
+  "success_threshold": 2,
+  "backoff": {
+    "strategy": "exponential_jitter",
+    "base_seconds": 0.5,
+    "max_seconds": 30,
+    "jitter_fraction": 0.2
+  },
+  "tags": ["prod", "tenant:global"],
+  "updated_by": "pe@company",
+  "updated_at": "2025-10-10T12:00:00Z"
+}
+```
+
+**Backoff Definition**
+For attempt `n` in half-open (starting at 1):
+`delay = min(max_seconds, base_seconds * 2^(n-1))`
+Apply jitter: `delay = delay * (1 ± jitter_fraction)` using random uniform.
+
+**Tasks & Deliverables**
+
+1. **Code Analysis**
+
+   * Enumerate all relevant functions, classes, and extension points in `ent_pycore/circuit_breaker.py`.
+   * Map how current repo scripts call external APIs and where the breaker wrapper should be inserted.
+
+2. **Design & Implementation**
+
+   * Implement `invoke_with_cb(name, callback, *args, **kwargs)` that:
+
+     * Loads config from MongoDB (with short-TTL in-process cache).
+     * Honors `mode` (`open` → immediately raise; `closed` → normal; `auto` → state machine).
+     * Uses the ent_pycore breaker, configuring `fail_max`, `reset_timeout`, `success_threshold`.
+     * Implements **half-open** trial gating using exponential backoff with jitter.
+     * Allows a **fallback** callable (optional) for graceful degradation (document clearly).
+     * Emits logs/metrics on: open → half-open → closed transitions; backoff delays; fallback use.
+   * If ent_pycore lacks a hook you need, propose a **minimal** change to `circuit_breaker.py` (with unified diff).
+
+3. **Tests** (`pytest`)
+
+   * Unit tests for: normal, open, half-open flow; manual modes; Mongo config reload; backoff growth; success threshold closing; retriable vs non-retriable error counting.
+   * Property tests: backoff monotonicity and cap.
+   * Chaos tests: injected 5xx/timeouts to confirm breaker opens and recovers.
+
+4. **Before/After Report for PE**
+
+   * Table of files added/modified.
+   * Before/After code snippets (small, focused).
+   * Rationale for each change (1-3 lines).
+   * Rollout plan, config guardrails, and a quick rollback path.
+
+5. **Usage Examples**
+
+   * Show replacing existing direct calls with `invoke_with_cb(...)` (include one with fallback).
+
+**Output Format (single markdown response)**
+
+* `# Summary` (≤10 lines)
+* `# Analysis of ent_pycore/circuit_breaker.py` (API list + where you’ll hook)
+* `# Design` (state machine, backoff, config load, manual override)
+* `# Code Changes` (per-file summary + unified diffs)
+* `# Tests` (pytest code blocks)
+* `# Usage Examples` (before/after)
+* `# Observability` (metrics/logs to emit; names)
+* `# Rollout & Runbook` (flags, config, rollback)
+* `# Risks & Mitigations`
+
+**Quality Bar (“like a Google engineer”)**
+
+* Deterministic, idempotent wrapper; zero global hidden state.
+* Clear separation: config load, policy calc, breaker call, fallback.
+* Tight diffs, self-contained tests, docs inline.
+* No new external deps; no hidden side-effects.
+
+**Acceptance Criteria (must pass)**
+
+* Manual override: `open` always short-circuits; `closed` forces normal; `auto` follows state machine.
+* Half-open honors exponential backoff with jitter; closes only after `success_threshold` consecutive successes.
+* Only retriable failures increment breaker counters.
+* Metrics/logs present for all state transitions and backoff events.
+* All tests green.
+
+---
+
+## Minimal wrapper signature & pseudocode (for clarity to the agent)
+
+```python
+# src/cb_wrapper.py
+from typing import Callable, TypeVar, Optional, Any, Dict
+from ent_pycore.circuit_breaker import CircuitBreaker, CircuitOpenError
+from .mongo import get_cb_config  # you will implement
+from .obs import record_metric, log_event  # you will implement
+
+T = TypeVar("T")
+
+def invoke_with_cb(name: str,
+                   callback: Callable[..., T],
+                   *args: Any,
+                   fallback: Optional[Callable[[Exception], T]] = None,
+                   **kwargs: Any) -> T:
+    """
+    Invoke `callback` protected by enterprise CircuitBreaker configured from MongoDB.
+
+    - Loads config by `name` (cached).
+    - Honors manual mode: "open"|"closed"|"auto".
+    - In half-open, applies exponential backoff with jitter before trial attempts.
+    - Emits metrics/logs for transitions, backoff delays, and fallback invocations.
+    """
+    cfg = get_cb_config(name)  # {mode, fail_max, reset_timeout_seconds, success_threshold, backoff{...}}
+
+    if cfg["mode"] == "open":
+        raise CircuitOpenError(f"Breaker '{name}' manually opened")
+
+    # Configure breaker from ent_pycore
+    cb = CircuitBreaker(
+        name=name,
+        fail_max=cfg["fail_max"],
+        reset_timeout=cfg["reset_timeout_seconds"],
+        success_threshold=cfg["success_threshold"]
+    )
+
+    # If cfg["mode"] == "closed", skip state checks but still count metrics
+    if cfg["mode"] == "closed":
+        try:
+            result = callback(*args, **kwargs)
+            record_metric("cb.closed.success", 1, {"name": name})
+            return result
+        except Exception as e:
+            record_metric("cb.closed.error", 1, {"name": name, "type": type(e).__name__})
+            if fallback: return fallback(e)
+            raise
+
+    # Auto mode with half-open exponential backoff when needed
+    # (Agent will implement: read cb.state(), compute backoff delay if HALF_OPEN, sleep, then attempt)
+    return cb.call(callback, *args, **kwargs)  # Agent augments half-open behavior per design
+```
+
+> The agent must flesh out `get_cb_config`, the half-open backoff wait, classification of retriable errors, and observability helpers, **without** diverging from `ent_pycore`’s intended usage.
+
+---
+
+## “Before/After” diff template the agent should use
+
+```diff
+# File: src/service/llm_client.py
+- resp = http_client.post(LLM_URL, json=payload, timeout=8)
++ from cb_wrapper import invoke_with_cb
++ resp = invoke_with_cb(
++     name="llm.completions",
++     callback=lambda: http_client.post(LLM_URL, json=payload, timeout=8),
++     fallback=lambda e: {"status":"degraded","choices":[{"text":"Service temporarily unavailable"}]}
++ )
+```
+
+---
+
+## Test plan checklist (agent must include code)
+
+* Unit: open/closed/auto; manual override; Mongo reload; success_threshold closing; non-retriable errors ignored; backoff growth + cap + jitter bounds.
+* Chaos: injected 5xx/timeouts → breaker opens; then recovers after `reset_timeout` with backoff and success threshold.
+* Property: backoff monotonicity; jitter within ±fraction.
+* Concurrency: multiple threads/processes using same breaker `name` behave correctly.
+
+---
+
+## Observability (names the agent must emit)
+
+* Counters: `cb.open.total`, `cb.half_open.total`, `cb.closed.total`, `cb.short_circuits.total`, `cb.fallback.total`
+* Histograms: `cb.backoff.seconds`, `cb.latency.seconds`
+* Logs: state transitions with `name`, `old_state`, `new_state`, `reason`
+
+---
+
+## Quick critique of your original prompt & what we fixed
+
+* **Ambiguity removed**: explicitly constrained the implementation to `ent_pycore/circuit_breaker.py` and banned new deps.
+* **PE asks embedded**: wrapper+callback, Mongo-backed config with manual override, half-open exponential backoff.
+* **Evaluation ready**: acceptance criteria + tests + observability naming.
+* **Output structure**: a single markdown spec with diffs and rollout steps so a PE can review fast.
+* **Data model**: provided a concrete Mongo schema and backoff definition to avoid interpretation gaps.
+
+---
+
+If you want, paste your actual `<< USE_CASES >>` and I’ll tailor the acceptance tests and example snippets to those flows.
+
+
+
 10:58 PM /06oct
 >>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 Got it—your current prompt has the right intent, but it’s a bit open-ended and leaves the agent guessing about scope, artifacts, and what “good” looks like. Below is a tighter, drop-in **zero-shot instruction template** you can paste into your runbook. It bakes in: clear goals, strict outputs, “before/after” diffs with *line-level* commentary, explicit references to `ent_pycore.circuit_breaker`, realistic data walkthroughs, tests, and a self-audit checklist “like a Google engineer.”

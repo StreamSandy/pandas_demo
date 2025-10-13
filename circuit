@@ -1,3 +1,352 @@
+
+>>>>>>>>>>>>>>>>>>>>>>>>>>
+10:15 PM 13-cot
+
+awesome—this is a great candidate for a crisp, “agent-friendly” zero-shot prompt. below is a drop-in template you can paste into your agent, plus extras (mongo schema, seed docs, test plan, and deploy snippets) so the agent can go truly end-to-end.
+
+---
+
+# ✅ copy-paste prompt (zero-shot, production style)
+
+**ROLE**
+You are a senior software engineer implementing a production-grade **Circuit Breaker** using our internal `ent_pycore` library. All logic must align with the reference implementation at:
+`venv\Lib\Site-Packages\pycore\stability\circuit_breaker.py`.
+
+**CONTEXT & CONSTRAINTS**
+
+* Use only the enterprise patterns already present in the above file.
+* Repo layout: `src/`, `tests/` (≈30 existing scripts).
+* Use our MongoDB utilities from `src\utils\envloader.py` for **all** Mongo calls (connections, reads, writes). Do **not** create ad-hoc Mongo clients elsewhere.
+* Clean-code principles:
+
+  * Prefer **exceptions** over error codes.
+  * **Small** functions that **do one thing**.
+  * Keep statements at the **same level of abstraction** within a function.
+
+**OBJECTIVE**
+Design and implement a reusable Circuit Breaker wrapper with:
+
+1. **Callback chaining** (like our “chain invoke” pattern).
+2. **Runtime parameters from MongoDB** (thresholds, window, reset, backoff, manual override, etc.).
+3. **Manual open/close** from Mongo toggles.
+4. **Exponential backoff** while in **half-open** (with jitter).
+
+**USE CASES TO SUPPORT**
+Insert your high-priority scenario(s) here:
+`<<FILL: USE_CASES>>`
+(Example: protect outbound LLM API calls; fail fast on persistent 5xx or latency > p95; allow manual open during downstream incident.)
+
+---
+
+## DELIVERABLES (produce in this exact order)
+
+### 1) Reasoning Summary (2–4 short paragraphs)
+
+* Summarize `ent_pycore` circuit-breaker functions/classes discovered in `pycore\stability\circuit_breaker.py`.
+* State the design you’ll implement and why (trade-offs: latency vs reliability, maintainability, failure modes).
+
+### 2) Proposed API (thin wrapper)
+
+* Provide a minimal public interface that **does one thing**: run a callable under circuit-breaker protection with chain-invoke support.
+* Exact signature (adapt if needed but keep spirit):
+
+```python
+def with_circuit_breaker(
+    name: str,
+    operation: Callable[[], T],
+    on_success: Optional[Callable[[T], Any]] = None,
+    on_failure: Optional[Callable[[Exception], Any]] = None,
+    chain: Optional[list[Callable[[T], T]]] = None,
+    context: Optional[dict] = None,
+) -> T:
+    ...
+```
+
+* All tunables (thresholds, cooldown, half-open probe count, backoff base/max/jitter, manual_override) must be **read at call time** from Mongo via `envloader.py`.
+
+### 3) Implementation (new/changed files)
+
+List every file **created or modified** and include code blocks. Keep functions small and cohesive.
+
+**a) `src/stability/circuit_wrapper.py` (NEW)**
+
+* Responsibilities: parameter fetch, state read/write, breaker transitions, backoff schedule, chain execution, metrics hooks.
+* Use exceptions; no error codes.
+* Ensure uniform abstraction per function.
+
+**b) `src/utils/envloader.py` (EXISTING)**
+
+* Show **only** any additions you make (helper that reads/writes a single CB doc by `name`). If unchanged, say “no changes”.
+
+**c) `src/stability/mongo_models.py` (NEW)**
+
+* Data access helpers (read/write “circuit_breakers” collection), typed dicts / pydantic model (if used in your codebase).
+
+**d) Brief DIFFS section**
+
+* For each changed file: *Before vs After* snippets (only relevant hunks).
+
+### 4) MongoDB schema & sample docs
+
+* Collection: `circuit_breakers`
+* Doc shape (example):
+
+```json
+{
+  "_id": "cb:llm_primary",
+  "name": "llm_primary",
+  "enabled": true,
+  "manual_override": { "state": "closed", "reason": null, "until": null },
+  "thresholds": {
+    "failure_rate_pct": 50,
+    "rolling_window_sec": 60,
+    "min_calls_in_window": 20
+  },
+  "timeouts": { "op_timeout_ms": 8000, "reset_timeout_ms": 30000 },
+  "half_open": { "probe_count": 3 },
+  "backoff": { "mode": "exponential", "base_ms": 200, "max_ms": 5000, "jitter": true },
+  "metrics_keys": { "success": "cb.llm.success", "failure": "cb.llm.failure", "state": "cb.llm.state" },
+  "updated_at": "2025-10-13T10:00:00Z",
+  "notes": "Default policy for primary LLM"
+}
+```
+
+* Provide **seed** commands (see “Deployment” below).
+
+### 5) Tests (`tests/test_circuit_wrapper.py`)
+
+* Cover transitions: closed→open (on threshold), open→half-open (after reset), half-open→closed (on probe success), half-open→open (on probe failure).
+* Validate: exponential backoff, Mongo toggles (manual open), chain callbacks order, exception propagation, parameter reload per call.
+* Use fixtures to stub Mongo via `envloader.py` layer (not a raw client).
+* Make tests deterministic (freeze time & seed RNG; mock jitter).
+
+### 6) PE-ready report (concise)
+
+* One page: problem, design, diffs, test matrix (cases & expected), rollback plan, and ops runbook link.
+
+---
+
+## ACCEPTANCE CRITERIA (hard checks)
+
+* **Correctness**: Transitions match design; half-open uses exponential backoff + jitter; parameters hot-reload from Mongo each call.
+* **Operability**: Manual override via Mongo takes effect **without deploy**.
+* **Clean Code**: Small functions, clear names, exception-first control flow, consistent abstraction layers.
+* **Tests**: ≥90% coverage on `src/stability/circuit_wrapper.py`; all transitions tested.
+* **Docs**: Before/After diffs and a one-page PE report supplied.
+
+---
+
+## IMPLEMENTATION HINTS (what to produce)
+
+### Example wrapper skeleton
+
+```python
+# src/stability/circuit_wrapper.py
+from typing import Callable, TypeVar, Optional, Any
+from src.utils.envloader import get_cb_config, get_cb_state, set_cb_state, utc_now
+
+T = TypeVar("T")
+
+class CircuitState(str):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+def with_circuit_breaker(
+    name: str,
+    operation: Callable[[], T],
+    on_success: Optional[Callable[[T], Any]] = None,
+    on_failure: Optional[Callable[[Exception], Any]] = None,
+    chain: Optional[list[Callable[[T], T]]] = None,
+    context: Optional[dict] = None,
+) -> T:
+    """
+    Does one thing: executes `operation` under circuit-breaker protection.
+    Raises exceptions; never returns error codes.
+    """
+    cfg = get_cb_config(name)            # from Mongo
+    state = get_cb_state(name)           # from Mongo
+    now = utc_now()
+
+    # Manual override (operability > everything)
+    mo = cfg.get("manual_override", {})
+    if mo and mo.get("state") in {CircuitState.OPEN, CircuitState.CLOSED, CircuitState.HALF_OPEN}:
+        state["state"] = mo["state"]
+
+    # Gate by state
+    if state["state"] == CircuitState.OPEN:
+        if now < state.get("next_try_at", now):
+            raise RuntimeError(f"circuit {name} is OPEN")
+        # move to half-open probe
+        state["state"] = CircuitState.HALF_OPEN
+        state["remaining_probes"] = cfg["half_open"]["probe_count"]
+
+    try:
+        result = operation()
+        # chain invoke
+        if chain:
+            for fn in chain:
+                result = fn(result)
+
+        # success handling
+        _record_success(name, cfg, state, now)
+        set_cb_state(name, state)
+        if on_success:
+            on_success(result)
+        return result
+
+    except Exception as exc:
+        # failure handling
+        _record_failure(name, cfg, state, now, exc)
+
+        if state["state"] == CircuitState.CLOSED and _should_open(cfg, state):
+            state["state"] = CircuitState.OPEN
+            state["next_try_at"] = now + _reset_delta(cfg)
+
+        elif state["state"] == CircuitState.HALF_OPEN:
+            # exponential backoff for next probe window
+            delay_ms = _next_backoff_ms(cfg, state)
+            state["state"] = CircuitState.OPEN
+            state["next_try_at"] = now + _ms(delay_ms)
+
+        set_cb_state(name, state)
+        if on_failure:
+            on_failure(exc)
+        raise  # prefer exceptions
+```
+
+*(Keep helpers like `_record_success/_record_failure/_should_open/_next_backoff_ms/_reset_delta/_ms` tiny and single-purpose.)*
+
+---
+
+## MONGODB: minimal schema helpers
+
+```python
+# src/stability/mongo_models.py
+from typing import Optional, Dict, Any
+from src.utils.envloader import mongo_get_one, mongo_upsert
+
+CB_COLL = "circuit_breakers"
+STATE_COLL = "circuit_states"
+
+def load_cb_config(name: str) -> Dict[str, Any]:
+    doc = mongo_get_one(CB_COLL, {"name": name, "enabled": True})
+    if not doc:
+        raise RuntimeError(f"CB config not found or disabled: {name}")
+    return doc
+
+def load_cb_state(name: str) -> Dict[str, Any]:
+    return mongo_get_one(STATE_COLL, {"name": name}) or {"name": name, "state": "closed"}
+
+def save_cb_state(name: str, state: Dict[str, Any]) -> None:
+    mongo_upsert(STATE_COLL, {"name": name}, state)
+```
+
+If your `envloader.py` already wraps these, re-export simple functions:
+
+```python
+# src/utils/envloader.py (additions only if needed)
+def get_cb_config(name: str): return load_cb_config(name)
+def get_cb_state(name: str):  return load_cb_state(name)
+def set_cb_state(name: str, state: dict): save_cb_state(name, state)
+```
+
+---
+
+## TEST PLAN (table you can paste into the PE report)
+
+| Case                    | Initial State | Stimulus                        | Expectation                                    |
+| ----------------------- | ------------- | ------------------------------- | ---------------------------------------------- |
+| 1 Closed→Closed         | closed        | success                         | counters reset, remains closed                 |
+| 2 Closed threshold trip | closed        | N failures in window            | state=open, next_try_at set                    |
+| 3 Open cool-down        | open          | call before next_try_at         | raises “OPEN”                                  |
+| 4 Open→Half-open probe  | open          | after reset_timeout             | transitions to half_open, remaining_probes=cfg |
+| 5 Half-open success     | half_open     | probe success × probe_count     | state=closed                                   |
+| 6 Half-open failure     | half_open     | probe fail                      | backoff computed (exp + jitter), state=open    |
+| 7 Manual override       | any           | manual_override=“open” in Mongo | denies calls until cleared                     |
+| 8 Parameter hot-reload  | closed        | change backoff in Mongo         | next call uses new backoff                     |
+| 9 Chain callbacks       | closed        | chain=[f1,f2]                   | f1 then f2, result threaded                    |
+| 10 Exception path       | any           | operation raises                | exception re-raised; on_failure invoked        |
+
+---
+
+## END-TO-DEPLOYMENT (Mongo)
+
+### Seed a config (example)
+
+```bash
+mongosh "$MONGO_URI" --eval '
+db.circuit_breakers.updateOne(
+  { name: "llm_primary" },
+  { $set: {
+      name: "llm_primary",
+      enabled: true,
+      manual_override: { state: "closed", reason: null, until: null },
+      thresholds: { failure_rate_pct: 50, rolling_window_sec: 60, min_calls_in_window: 20 },
+      timeouts: { op_timeout_ms: 8000, reset_timeout_ms: 30000 },
+      half_open: { probe_count: 3 },
+      backoff: { mode: "exponential", base_ms: 200, max_ms: 5000, jitter: true },
+      metrics_keys: { success: "cb.llm.success", failure: "cb.llm.failure", state: "cb.llm.state" },
+      updated_at: new Date()
+  }},
+  { upsert: true }
+);
+'
+```
+
+### Docker-compose (local)
+
+```yaml
+version: "3.9"
+services:
+  mongo:
+    image: mongo:7
+    ports: ["27017:27017"]
+    volumes: ["./.data/mongo:/data/db"]
+  app:
+    build: .
+    environment:
+      MONGO_URI: "mongodb://mongo:27017/app"
+    depends_on: [mongo]
+```
+
+### K8s (minimal)
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: app }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: app } }
+  template:
+    metadata: { labels: { app: app } }
+    spec:
+      containers:
+      - name: app
+        image: your/image:tag
+        env:
+        - name: MONGO_URI
+          valueFrom:
+            secretKeyRef: { name: mongo-secret, key: uri }
+```
+
+---
+
+## WHY THIS PROMPT WORKS
+
+* **Sequenced thinking**: understand → design → implement → test → report.
+* **Clear success bar**: acceptance criteria + test matrix.
+* **Single-responsibility**: tiny helpers; exception-first flow.
+* **Operability**: manual override via Mongo; hot-reloadable params; backoff with jitter.
+* **PE-ready**: diffs + one-page report checklist.
+
+---
+
+### want me to tailor this to your exact `envloader.py` helpers (names & signatures) and emit the full `tests/test_circuit_wrapper.py` file too?
+
+
+
 >>>>>>>>>>>>>>>>>>>>>>>>>>
 
 11: 00 AM / 120ct

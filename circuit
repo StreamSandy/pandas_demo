@@ -1,3 +1,328 @@
+>>>>>>>>>>>>>>>>>>>>>>
+10:30 PM 14-cot2025
+
+Got it — you want (1) a sharper zero-shot instruction prompt that reliably elicits the full solution from an agent, and (2) a concrete, minimal FastAPI example showing a circuit breaker plus “chaos” testing with step-by-step commands. Here you go.
+
+# 1) Upgraded zero-shot instruction prompt (copy-paste ready)
+
+**Title:** Build a FastAPI endpoint with a circuit breaker + chaos test plan
+
+**Objective:**
+Create a small FastAPI app with one endpoint that calls a simulated downstream service wrapped in a circuit breaker. Provide a *fully reproducible* chaos test plan showing behavior with and without failures.
+
+**Constraints & rules**
+
+* Python 3.10+. Use only: `fastapi`, `uvicorn`, `pybreaker`, `httpx` (no heavy frameworks).
+* Keep code in a single file `app.py`. Use `requirements.txt`.
+* Circuit breaker settings must be easy to tweak (threshold, timeout).
+* Logging must clearly show breaker state transitions (CLOSED → OPEN → HALF_OPEN → CLOSED).
+* “Chaos mode” must be toggled by an env var `CHAOS_MODE=on` and a failure rate env var `CHAOS_FAIL_PCT` (0–100). No external DBs.
+* Provide both: simple cURL loop **and** a Chaos Toolkit experiment file to run the same scenario.
+
+**Deliverables**
+
+1. `app.py` (FastAPI + circuit breaker + simple “downstream” function).
+2. `requirements.txt`.
+3. `chaos-experiment.json` (Chaos Toolkit experiment that flips chaos on, sends traffic, and asserts breaker opens).
+4. A **Step-by-step** test script (shell commands) for:
+
+   * baseline (no chaos)
+   * chaos on (trigger OPEN state)
+   * recovery after `reset_timeout` (HALF_OPEN → CLOSED)
+
+**Functional details**
+
+* Endpoint: `GET /work` calls a helper `call_downstream()` wrapped by circuit breaker.
+* When `CHAOS_MODE=on`, `call_downstream()` randomly throws an exception at `CHAOS_FAIL_PCT` probability.
+* Circuit breaker config: `fail_max=3`, `reset_timeout=10` (changeable via env: `CB_FAIL_MAX`, `CB_RESET_TIMEOUT`).
+* Return JSON indicating: breaker state, request id, and whether downstream succeeded.
+
+**Acceptance criteria**
+
+* With `CHAOS_MODE=off`: >95% success over 20 requests, breaker never opens.
+* With `CHAOS_MODE=on` and `CHAOS_FAIL_PCT>=80`: breaker transitions to OPEN after 3 consecutive failures and starts short-circuiting within the same run.
+* After `reset_timeout`, one request tries HALF_OPEN; on success breaker returns to CLOSED.
+
+**Output format**
+
+* Provide files inline as fenced code blocks with filenames in comments at top.
+* Provide the exact shell commands to run everything from a clean directory.
+* Keep explanations concise and operational (no fluff).
+
+---
+
+# 2) Working example (FastAPI + pybreaker + chaos)
+
+> Note: In Python there isn’t a “chaos-monkey” like Spring’s. We typically use **Chaos Toolkit** for experiments and run “fault injection” inside our code via flags/env vars. Below is a tiny, reproducible pattern.
+
+```python
+# app.py
+import os, random, time, uuid, logging
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from pybreaker import CircuitBreaker, CircuitBreakerListener, STATE_CLOSED, STATE_OPEN, STATE_HALF_OPEN
+
+# ---- Config via env ----
+FAIL_MAX = int(os.getenv("CB_FAIL_MAX", "3"))             # consecutive failures before OPEN
+RESET_TIMEOUT = int(os.getenv("CB_RESET_TIMEOUT", "10"))  # seconds before HALF_OPEN probe
+CHAOS_MODE = os.getenv("CHAOS_MODE", "off").lower() == "on"
+CHAOS_FAIL_PCT = int(os.getenv("CHAOS_FAIL_PCT", "0"))    # 0..100
+CHAOS_DELAY_MS = int(os.getenv("CHAOS_DELAY_MS", "0"))    # optional latency
+
+# ---- Logging ----
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("app")
+
+class LogListener(CircuitBreakerListener):
+    def state_change(self, cb, old_state, new_state):
+        log.warning(f"[CB] state change: {old_state.name} -> {new_state.name}")
+    def failure(self, cb, exc):
+        log.error(f"[CB] failure recorded: {type(exc).__name__}: {exc}")
+
+breaker = CircuitBreaker(fail_max=FAIL_MAX, reset_timeout=RESET_TIMEOUT, listeners=[LogListener()])
+
+app = FastAPI(title="CB + Chaos demo")
+
+def call_downstream() -> dict:
+    # optional latency
+    if CHAOS_DELAY_MS > 0:
+        time.sleep(CHAOS_DELAY_MS / 1000.0)
+    # random failure under chaos
+    if CHAOS_MODE and random.randint(1,100) <= CHAOS_FAIL_PCT:
+        raise RuntimeError("Injected downstream failure (chaos)")
+    # pretend success
+    return {"downstream": "ok"}
+
+@breaker
+def guarded_call():
+    return call_downstream()
+
+@app.get("/work")
+def work():
+    rid = str(uuid.uuid4())[:8]
+    try:
+        result = guarded_call()
+        state = breaker.current_state
+        return JSONResponse({"request_id": rid, "ok": True, "result": result, "cb_state": state.name})
+    except Exception as e:
+        state = breaker.current_state
+        # When OPEN, pybreaker raises CircuitBreakerError immediately (short-circuit)
+        log.exception(f"Request {rid} failed in state {state.name}")
+        raise HTTPException(status_code=503 if state == STATE_OPEN else 500,
+                            detail={"request_id": rid, "ok": False, "error": str(e), "cb_state": state.name})
+
+@app.get("/health")
+def health():
+    return {"status": "up", "cb_state": breaker.current_state.name,
+            "chaos": {"enabled": CHAOS_MODE, "fail_pct": CHAOS_FAIL_PCT, "delay_ms": CHAOS_DELAY_MS},
+            "config": {"fail_max": FAIL_MAX, "reset_timeout": RESET_TIMEOUT}}
+```
+
+```text
+# requirements.txt
+fastapi
+uvicorn
+pybreaker
+httpx
+```
+
+### Run it (baseline first)
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app:app --reload --port 8085
+```
+
+New terminal (baseline, no chaos):
+
+```bash
+# Expect all success, breaker stays CLOSED
+for i in {1..10}; do curl -s http://localhost:8085/work | jq '.cb_state'; done
+# Check health/config
+curl -s http://localhost:8085/health | jq
+```
+
+### Turn on “chaos mode” and trigger OPEN
+
+Stop the server and restart with chaos env:
+
+```bash
+export CHAOS_MODE=on
+export CHAOS_FAIL_PCT=90        # very failure-prone
+export CB_FAIL_MAX=3            # after 3 consecutive failures => OPEN
+export CB_RESET_TIMEOUT=10      # 10s before HALF_OPEN probe
+uvicorn app:app --reload --port 8085
+```
+
+Drive traffic to provoke failures (the first few will be 500; after 3 consecutive failures, calls short-circuit to 503 with `cb_state":"OPEN"`):
+
+```bash
+for i in {1..15}; do curl -s http://localhost:8085/work | jq '{ok:.ok, state:.cb_state}'; sleep 0.3; done
+# Tail logs to SEE transitions: CLOSED -> OPEN
+# (Look for: "[CB] state change: CLOSED -> OPEN")
+```
+
+### Observe recovery to HALF_OPEN → CLOSED
+
+Wait 10s (reset timeout), then send a few more requests:
+
+```bash
+sleep 10
+for i in {1..10}; do curl -s http://localhost:8085/work | jq '{ok:.ok, state:.cb_state}'; sleep 0.3; done
+# If a HALF_OPEN probe succeeds, breaker returns to CLOSED.
+# With CHAOS_FAIL_PCT=90, you may still see it flip OPEN again; reduce to, say, 10 to demonstrate stable recovery:
+export CHAOS_FAIL_PCT=10
+```
+
+> Note on “sliding window”: **pybreaker** trips on *consecutive* failures (`fail_max`) rather than a rolling ratio window. If you specifically need a *windowed error rate*, you can layer a small counter over N recent requests and raise a synthetic exception to the breaker when the rolling failure rate exceeds a threshold. (Happy to add that if you want it.)
+
+---
+
+## Optional: Chaos Toolkit experiment
+
+This experiment: (1) starts with steady state (breaker CLOSED), (2) turns chaos on (high fail%), (3) sends bursts to trip the breaker, (4) asserts state OPEN appears in responses/logs, then (5) lowers fail% and validates recovery.
+
+```json
+{
+  "version": "1.0.0",
+  "title": "FastAPI Circuit Breaker Chaos Experiment",
+  "description": "Trip breaker under high failure rate, then recover.",
+  "steady-state-hypothesis": {
+    "title": "Breaker starts CLOSED",
+    "probes": [{
+      "type": "probe",
+      "name": "health-closed",
+      "tolerance": { "type": "jsonpath", "path": "$.cb_state", "expect": "CLOSED" },
+      "provider": {
+        "type": "http",
+        "timeout": 3,
+        "url": "http://localhost:8085/health",
+        "method": "GET"
+      }
+    }]
+  },
+  "method": [
+    {
+      "type": "action",
+      "name": "enable-chaos-high",
+      "provider": {
+        "type": "python",
+        "module": "os",
+        "func": "putenv",
+        "arguments": { "key": "CHAOS_FAIL_PCT", "value": "90" }
+      }
+    },
+    {
+      "type": "action",
+      "name": "send-traffic-to-trip",
+      "provider": {
+        "type": "process",
+        "path": "bash",
+        "arguments": ["-lc", "for i in {1..20}; do curl -s http://localhost:8085/work >/dev/null; done"]
+      }
+    },
+    {
+      "type": "probe",
+      "name": "breaker-open-check",
+      "tolerance": { "type": "regex", "pattern": "OPEN" },
+      "provider": {
+        "type": "process",
+        "path": "bash",
+        "arguments": ["-lc", "curl -s http://localhost:8085/work"]
+      }
+    },
+    {
+      "type": "action",
+      "name": "lower-chaos",
+      "provider": {
+        "type": "python",
+        "module": "os",
+        "func": "putenv",
+        "arguments": { "key": "CHAOS_FAIL_PCT", "value": "10" }
+      }
+    },
+    {
+      "type": "action",
+      "name": "wait-reset-timeout",
+      "provider": {
+        "type": "process",
+        "path": "bash",
+        "arguments": ["-lc", "sleep ${CB_RESET_TIMEOUT:-10}"]
+      }
+    },
+    {
+      "type": "probe",
+      "name": "breaker-recovers",
+      "tolerance": { "type": "regex", "pattern": "CLOSED" },
+      "provider": {
+        "type": "process",
+        "path": "bash",
+        "arguments": ["-lc", "for i in {1..10}; do curl -s http://localhost:8085/work; done | tail -n1"]
+      }
+    }
+  ],
+  "rollbacks": []
+}
+```
+
+Run:
+
+```bash
+pip install chaostoolkit
+chaos run chaos-experiment.json
+```
+
+---
+
+## If you specifically need “IML” and “profile” like Spring
+
+Those are IntelliJ/Spring concepts. In Python, prefer:
+
+* `pyproject.toml` or `requirements.txt` for dependencies (above).
+* Use env var “profiles” (e.g., `PROFILE=chaos`) to toggle behavior inside `app.py`. Example:
+
+  ```bash
+  export PROFILE=chaos
+  export CHAOS_MODE=on
+  ```
+* If you’re using PyCharm/IntelliJ, you can set these env vars in a **Run/Debug Configuration** instead of `.iml`.
+
+---
+
+## Quick recap test script
+
+```bash
+# 1) Clean run
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+unset CHAOS_MODE CHAOS_FAIL_PCT CB_FAIL_MAX CB_RESET_TIMEOUT
+uvicorn app:app --port 8085 &
+
+# baseline
+for i in {1..10}; do curl -s http://localhost:8085/work | jq -r '.cb_state'; done
+
+# 2) Enable chaos and trip breaker
+export CHAOS_MODE=on
+export CHAOS_FAIL_PCT=90
+export CB_FAIL_MAX=3
+export CB_RESET_TIMEOUT=10
+pkill -f "uvicorn app:app" || true
+uvicorn app:app --port 8085 &
+
+for i in {1..15}; do curl -s http://localhost:8085/work | jq -r '.cb_state'; sleep 0.2; done
+
+# 3) Recover
+sleep 10
+export CHAOS_FAIL_PCT=10
+for i in {1..10}; do curl -s http://localhost:8085/work | jq -r '.cb_state'; sleep 0.2; done
+```
+
+---
+
+If you want me to swap **consecutive-failure** tripping for a **rolling-window error-rate** (true “sliding window”), say the window size and threshold (e.g., 20 requests / 50% errors) and I’ll extend the code to maintain a deque and raise synthetic failures to the breaker when the rolling error rate breaches your target.
+
+
 
 >>>>>>>>>>>>>>>>>>>>>>
 10:40 PM 13oct:

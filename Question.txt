@@ -1,0 +1,104 @@
+Perfect — these are exactly the kind of probing, architect-level validation questions that a Senior GenAI Solutions Architect at Goldman Sachs should ask during an ideation or review session.
+
+Below is a refined and structured list you can use during the discussion or in written feedback.
+Each question is grouped by intent, with examples of why to ask and what insight you’re seeking.
+
+⸻
+
+🧩 1. Problem Understanding & Current State
+
+(Purpose: Clarify the baseline and pain points before jumping to AI solutions.)
+	•	How is this activity currently being handled manually?
+→ Helps identify which steps are repetitive, error-prone, or inconsistent.
+	•	What tools or logs are used today (e.g., DBA tables, Splunk, Informatica lineage)?
+→ Reveals available data sources for automation.
+	•	What specific challenges or delays are teams facing during decommissioning?
+→ Quantifies effort, risk, and ROI opportunities.
+	•	What is the current approval and audit trail process before dropping tables?
+→ Important for defining automation safety checks.
+
+⸻
+
+⚙️ 2. Solution Design & Alternative Approaches
+
+(Purpose: Assess if GenAI is the best fit or if simpler automation suffices.)
+	•	Is there a simpler rule-based or SQL-script automation that can achieve 70–80 % of the outcome?
+→ Tests whether GenAI adds unique value.
+	•	Can we schedule scripts to analyze table access patterns and generate cleanup reports without AI?
+→ Evaluates whether this should start as a conventional automation.
+	•	If GenAI is used, what part of the process actually needs reasoning or summarization (vs. deterministic logic)?
+→ Differentiates between automation and intelligence use cases.
+	•	Could we integrate existing data-catalog or lineage tools (Informatica EDC, Collibra) before building a new AI layer?
+→ Encourages reuse of enterprise assets.
+
+⸻
+
+🧠 3. Nature of the Use Case
+
+(Purpose: Position it correctly within the innovation funnel.)
+	•	Is this still in ideation stage or have we validated feasibility with real metadata samples?
+→ Determines maturity (ideation → prototype → production).
+	•	Does the proposed approach rely on GenAI (language-based reasoning) or traditional AI/ML (pattern detection)?
+→ Clarifies model category and infrastructure needs.
+	•	What is the expected output format — plain reports, recommendations, or executable scripts?
+→ Defines scope and success criteria.
+
+⸻
+
+🚀 4. Scalability & Implementation
+
+(Purpose: Check readiness for enterprise scale and operationalization.)
+	•	How would this scale across 1000+ schemas and multiple data platforms (Oracle, Snowflake, DB2)?
+→ Surfaces integration complexity.
+	•	Can the AI reasoning handle cross-system dependencies (e.g., ETL jobs, API feeds)?
+→ Tests robustness of dependency detection.
+	•	What automation hooks are planned — ServiceNow tickets, Confluence reports, or Git-based workflows?
+→ Connects insights to action.
+	•	What safety nets are built in (dry-run mode, approval gating, rollback)?
+→ Ensures compliance and resilience.
+
+⸻
+
+💡 5. Business Value & Organizational Impact
+
+(Purpose: Quantify why the organization should care.)
+	•	What measurable benefits do we expect — storage savings, fewer DBA hours, compliance risk reduction?
+→ Converts innovation to business KPIs.
+	•	How will this align with broader modernization or data-governance initiatives?
+→ Links to strategic programs.
+	•	Who are the primary beneficiaries — DBAs, data-governance team, or application owners?
+→ Clarifies stakeholder value.
+	•	Can we estimate ROI or efficiency gain from the proposed automation?
+→ Supports prioritization in the GenAI portfolio.
+
+⸻
+
+🧭 6. Risk & Governance
+
+(Purpose: Ensure the solution aligns with regulatory and internal risk controls.)
+	•	How will we prevent false positives — i.e., AI recommending deletion of active but infrequent tables?
+→ Drives requirement for human-in-loop validation.
+	•	What audit trail or explainability will accompany each recommendation?
+→ Essential for regulatory compliance and trust.
+	•	Does this access or process any sensitive metadata requiring data-classification review?
+→ Ensures security compliance.
+
+⸻
+
+🏁 7. Decision Framing Questions
+
+(Purpose: Conclude discussion with actionable next steps.)
+	•	Should this move forward as a quick automation PoC first, or as a GenAI pilot with explainable reasoning?
+	•	If successful, how will we integrate it into ongoing decommissioning workflows?
+	•	Who will own the model maintenance and metadata refresh process?
+
+⸻
+
+✅ How to Use These Questions
+	•	In a design review meeting: Ask 1–2 from each category to guide the discussion logically.
+	•	In written feedback (email or Confluence): Group them under Feasibility • Alternatives • Impact • Risks.
+	•	During ideation boards: Mark questions that uncover automation readiness vs GenAI necessity.
+
+⸻
+
+Would you like me to turn these into a review checklist template (Markdown + rating columns for Feasibility, Value, Risk, Next Steps) that you can reuse for validating other GenAI use cases across engineering teams?

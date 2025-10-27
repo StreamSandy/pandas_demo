@@ -1,0 +1,380 @@
+Got it—let’s turn your MongoDB collections into a crisp, actionable Grafana dashboard for a GenAI conversational-analytics platform. I’ll assume Grafana’s MongoDB data source is already wired and that panels can run native aggregation pipelines.
+
+Overview of Data Understanding
+
+Collections & notable fields (with normalization notes):
+	•	conversations
+conversation_id (UUID/string; sometimes spaced), caption, user_agent, user id (string like u12345), created_at (recommended), history
+Normalize: trim spaces in conversation_id; standardize user id → user_id.
+	•	message_records
+_id/foid, timestamp (ISO), promptId/promptld, threadId, ppid, elid (looks like “employee/login id” == user_id), userMessage, agentResponse, conversation_id (recommended), chat_id (sometimes present)
+Normalize: promptld→prompt_id, elid→user_id, ensure conversation_id.
+	•	conversation_feedbacks
+_id/Soid, conversation id (spacing!), message seq num (typoed “sed”), helpful (bool), feedback, timestamp (recommended)
+Normalize: rename to conversation_id, message_seq_num, add timestamp.
+	•	message_feedbacks
+_id, timestamp, liked (bool), feedback, prompt id (→prompt_id), prompt, response, user (→user_id), chat id (→conversation_id)
+Normalize: map chat id to conversation_id, align user with users.
+	•	users
+_id/Soid, email, first_name, last_name, user id (→user_id)
+
+Join keys (preferred after normalization):
+	•	conversations.user_id ↔ users.user_id
+	•	message_records.conversation_id ↔ conversations.conversation_id
+	•	message_feedbacks.conversation_id ↔ conversations.conversation_id
+	•	conversation_feedbacks.conversation_id ↔ conversations.conversation_id
+	•	message_records.prompt_id ↔ message_feedbacks.prompt_id (for prompt-level KPIs)
+
+Derived/parsed fields (for metrics & filters):
+	•	Error classification from agentResponse (regex): error_entitlement, error_system, error_policy, ok.
+	•	Helpfulness / Like flags: helpful (conversation) and liked (message).
+	•	Client parsed from user_agent (Chrome/51 → Chrome 51).
+	•	Day/hour buckets from timestamp for time series.
+	•	PII guard: never surface userMessage if it contains sensitive tokens; show counts not content in overview.
+
+⸻
+
+Key Metrics & KPIs (quantitative insights)
+
+Product/Business:
+	1.	Daily Active Conversations (DAC) = count distinct conversation_id per day.
+	2.	Messages per Conversation = avg/median messages per conversation_id.
+	3.	Helpfulness Rate = sum(helpful)/count from conversation_feedbacks.
+	4.	Like Rate (Message) = sum(liked)/count from message_feedbacks.
+	5.	Top Use Cases / Prompts = top prompt/prompt_id by frequency & like rate.
+	6.	User Adoption = active users/day (distinct user_id) and top users/teams.
+	7.	Client Mix = share by user_agent (Chrome, iOS, …).
+
+Quality/Risk:
+8. Error Rate = messages with error class / total messages.
+9. Entitlement Denials (Security) = count & % of error_entitlement.
+10. System Failures (Reliability) = count & % of error_system.
+11. Guardrail/Policy Blocks = count of error_policy.
+
+Operational:
+12. Prompt Performance Table = per prompt_id: calls, like rate, error rate.
+13. Negative Feedback Feed = latest feedback text + links for triage.
+
+(If you later store model/version, add Model Quality Split: helpful/like/error by model_version.)
+
+⸻
+
+MongoDB Aggregation Design (pipeline examples)
+
+Tip: In Grafana’s MongoDB query editor, choose Pipeline and paste these JSON arrays. Where I use variables like $__from, $__to, $user, $client, $errorClass, set Grafana Dashboard Variables to drive filters.
+
+1) Time series: Daily Active Conversations & Messages
+
+[
+  {"$match": {
+    "timestamp": {"$gte": {"$toDate": "$__from"}, "$lte": {"$toDate": "$__to"}},
+    "$expr": {"$ne": ["$conversation_id", null]}
+  }},
+  {"$project": {
+    "day": {"$dateTrunc": {"date": "$timestamp", "unit": "day"}},
+    "conversation_id": 1
+  }},
+  {"$group": {
+    "_id": "$day",
+    "conversations": {"$addToSet": "$conversation_id"},
+    "messages": {"$sum": 1}
+  }},
+  {"$project": {
+    "_id": 0,
+    "time": "$_id",
+    "daily_active_conversations": {"$size": "$conversations"},
+    "messages": 1
+  }},
+  {"$sort": {"time": 1}}
+]
+
+Collection: message_records
+Grafana: Time series (two lines: DAC & Messages).
+
+2) Helpfulness Rate over time (conversation feedback)
+
+[
+  {"$match": {
+    "timestamp": {"$gte": {"$toDate": "$__from"}, "$lte": {"$toDate": "$__to"}}
+  }},
+  {"$project": {
+    "day": {"$dateTrunc": {"date": "$timestamp", "unit": "day"}},
+    "helpful": {"$toBool": "$helpful"}
+  }},
+  {"$group": {
+    "_id": "$day",
+    "total": {"$sum": 1},
+    "helpful_count": {"$sum": {"$cond": ["$helpful", 1, 0]}}
+  }},
+  {"$project": {
+    "_id": 0,
+    "time": "$_id",
+    "helpfulness_rate": {"$cond": [{"$gt": ["$total", 0]}, {"$divide": ["$helpful_count", "$total"]}, 0]}
+  }},
+  {"$sort": {"time": 1}}
+]
+
+Collection: conversation_feedbacks
+Grafana: Time series (%).
+
+3) Error classification & rate (message level)
+
+[
+  {"$match": {
+    "timestamp": {"$gte": {"$toDate": "$__from"}, "$lte": {"$toDate": "$__to"}},
+    "$expr": {"$ne": ["$agentResponse", null]},
+    "$expr": {"$ne": ["$conversation_id", null]}
+  }},
+  {"$set": {
+    "error_class": {
+      "$switch": {
+        "branches": [
+          {"case": {"$regexMatch": {"input": "$agentResponse", "regex": "entitlement|not have the required entitlements", "options": "i"}}, "then": "error_entitlement"},
+          {"case": {"$regexMatch": {"input": "$agentResponse", "regex": "error processing|system error|internal server", "options": "i"}}, "then": "error_system"},
+          {"case": {"$regexMatch": {"input": "$agentResponse", "regex": "cannot fulfill this request|policy|restricted", "options": "i"}}, "then": "error_policy"}
+        ],
+        "default": "ok"
+      }
+    },
+    "day": {"$dateTrunc": {"date": "$timestamp", "unit": "day"}}
+  }},
+  {"$group": {
+    "_id": {"day":"$day","error_class":"$error_class"},
+    "count": {"$sum": 1}
+  }},
+  {"$group": {
+    "_id": "$_id.day",
+    "by_class": {"$push": {"k": "$_id.error_class", "v": "$count"}},
+    "total": {"$sum": "$count"}
+  }},
+  {"$project": {
+    "_id": 0,
+    "time": "$_id",
+    "error_entitlement": {"$ifNull": [{"$getField": {"field": "error_entitlement", "input": {"$arrayToObject": "$by_class"}}}, 0]},
+    "error_system": {"$ifNull": [{"$getField": {"field": "error_system", "input": {"$arrayToObject": "$by_class"}}}, 0]},
+    "error_policy": {"$ifNull": [{"$getField": {"field": "error_policy", "input": {"$arrayToObject": "$by_class"}}}, 0]},
+    "ok": {"$ifNull": [{"$getField": {"field": "ok", "input": {"$arrayToObject": "$by_class"}}}, 0]},
+    "error_rate": {"$cond":[{"$gt":["$total",0]},{"$divide":[{"$add":["$error_entitlement","$error_system","$error_policy"]},"$total"]},0]}
+  }},
+  {"$sort": {"time": 1}}
+]
+
+Collection: message_records
+Grafana: Stacked time series by error class + line for error_rate.
+
+4) Client mix (user agent)
+
+[
+  {"$match": {
+    "created_at": {"$gte": {"$toDate": "$__from"}, "$lte": {"$toDate": "$__to"}}
+  }},
+  {"$set": {
+    "client": {
+      "$trim": { "input": { "$first": { "$split": ["$user_agent", "/"] } } }
+    }
+  }},
+  {"$group": {"_id": "$client", "count": {"$sum": 1}}},
+  {"$project": {"_id": 0, "client": "$_id", "count": 1}},
+  {"$sort": {"count": -1}}
+]
+
+Collection: conversations
+Grafana: Pie or horizontal bar.
+
+5) Prompt performance table (joins msg + feedbacks)
+
+[
+  {"$match": {
+    "timestamp": {"$gte": {"$toDate": "$__from"}, "$lte": {"$toDate": "$__to"}},
+    "$expr": {"$ne": ["$prompt_id", null]}
+  }},
+  {"$lookup": {
+    "from": "message_feedbacks",
+    "let": {"pid": "$prompt_id"},
+    "pipeline": [
+      {"$match": {"$expr": {"$eq": ["$prompt_id","$$pid"]}}},
+      {"$project": {"liked": {"$toBool":"$liked"}}}
+    ],
+    "as": "mf"
+  }},
+  {"$set": {
+    "liked_count": {"$size": {"$filter": {"input": "$mf", "as":"m", "cond": "$$m.liked"}}}
+  }},
+  {"$set": {
+    "error_flag": {
+      "$regexMatch": {"input": "$agentResponse", "regex": "error|cannot fulfill|entitlement|restricted", "options": "i"}
+    }
+  }},
+  {"$group": {
+    "_id": "$prompt_id",
+    "calls": {"$sum": 1},
+    "likes": {"$sum": "$liked_count"},
+    "errors": {"$sum": {"$cond":["$error_flag",1,0]}},
+    "sample_prompt": {"$first": "$userMessage"}
+  }},
+  {"$project": {
+    "_id": 0,
+    "prompt_id": "$_id",
+    "calls": 1,
+    "like_rate": {"$cond":[{"$gt":["$calls",0]},{"$divide":["$likes","$calls"]},0]},
+    "error_rate": {"$cond":[{"$gt":["$calls",0]},{"$divide":["$errors","$calls"]},0]},
+    "sample_prompt": 1
+  }},
+  {"$sort": [{"error_rate": -1}, {"calls": -1}]},
+  {"$limit": 50}
+]
+
+Collection: message_records
+Grafana: Table with conditional color on error_rate and like_rate.
+
+6) User adoption & leaderboard (join conversations→users)
+
+[
+  {"$match": {
+    "created_at": {"$gte": {"$toDate": "$__from"}, "$lte": {"$toDate": "$__to"}}
+  }},
+  {"$group": {
+    "_id": "$user_id",
+    "conversations": {"$addToSet": "$conversation_id"}
+  }},
+  {"$project": {
+    "user_id": "$_id",
+    "conv_count": {"$size": "$conversations"}
+  }},
+  {"$lookup": {
+    "from": "users",
+    "localField": "user_id",
+    "foreignField": "user_id",
+    "as": "u"
+  }},
+  {"$set": {
+    "user_email": {"$ifNull":[{"$arrayElemAt":["$u.email",0]},""]},
+    "user_name": {
+      "$concat": [
+        {"$ifNull":[{"$arrayElemAt":["$u.first_name",0]},""]},
+        " ",
+        {"$ifNull":[{"$arrayElemAt":["$u.last_name",0]},""]}
+      ]
+    }
+  }},
+  {"$project": {"_id":0,"user_id":1,"user_email":1,"user_name":1,"conv_count":1}},
+  {"$sort": {"conv_count": -1}},
+  {"$limit": 25}
+]
+
+Grafana: Table or bar chart.
+
+7) Negative feedback triage (latest items with links)
+
+[
+  {"$match": {
+    "timestamp": {"$gte": {"$toDate": "$__from"}, "$lte": {"$toDate": "$__to"}},
+    "liked": {"$in": [false, 0]},
+    "feedback": {"$ne": null}
+  }},
+  {"$sort": {"timestamp": -1}},
+  {"$limit": 50},
+  {"$project": {
+    "_id": 0,
+    "timestamp": 1,
+    "prompt_id": 1,
+    "feedback": 1,
+    "response_snippet": {"$substr": ["$response", 0, 160]}
+  }}
+]
+
+Collection: message_feedbacks
+Grafana: Table with data links to internal tooling using prompt_id.
+
+⸻
+
+Grafana Dashboard Layout & Panels
+
+Top row (health & engagement)
+	1.	Stat: Daily Active Conversations (today) — from pipeline #1 (last point).
+	2.	Stat: Messages Today — pipeline #1.
+	3.	Stat: Helpfulness Rate (7-day) — pipeline #2 filtered last 7d (transform to last value or avg).
+	4.	Stat: Error Rate (7-day) — from pipeline #3 (sum errors/sum total over 7d).
+
+Row: Trends
+5. Time series (lines): Daily Active Conversations vs Messages — pipeline #1.
+6. Stacked time series: Errors by Class + Error Rate overlay — pipeline #3 (series per class; add a threshold/transform line for error_rate).
+
+Row: Users & Clients
+7. Bar (horizontal): Top 25 Users by Conversations — pipeline #6.
+8. Pie / Donut: Client Mix (User Agent) — pipeline #4.
+
+Row: Prompts & Feedback
+9. Table: Prompt Performance (Top 50) — pipeline #5 (columns: prompt_id, calls, like_rate, error_rate, sample_prompt). Add conditional formatting: red if error_rate>0.2, green if like_rate>0.7.
+10. Table: Latest Negative Feedback — pipeline #7; data links on prompt_id.
+
+Row: Conversation Helpfulness
+11. Time series: Helpfulness Rate over Time — pipeline #2.
+12. Table (drilldown): Recent Conversation Feedback — direct from conversation_feedbacks (project conversation_id, message_seq_num, helpful, feedback, timestamp).
+
+⸻
+
+Mapping to Grafana Queries & Config
+
+Data source: MongoDB (Pipeline mode)
+
+Dashboard Variables (for filtering):
+	•	$user (query: distinct conversations.user_id, include “All”)
+	•	$client (query: distinct parsed client from conversations.user_agent)
+	•	$errorClass (enum: ok,error_entitlement,error_system,error_policy)
+	•	$promptId (distinct message_records.prompt_id)
+	•	$__from / $__to (Grafana time range)
+
+How to apply variables:
+	•	Add $match clauses conditionally:
+	•	User filter example (messages):
+{"$lookup": {"from":"conversations","localField":"conversation_id","foreignField":"conversation_id","as":"conv"}}, {"$match":{"$or":[{"$expr":{"$eq":["$__all", "$user"]}}, {"conv.user_id": "$user"}]}}
+	•	Client filter example (conversations): after parsing client, add
+{"$match":{"$or":[{"$expr":{"$eq":["$__all","$client"]}}, {"client":"$client"}]}}
+	•	Error class filter (messages): filter on computed error_class if $errorClass != 'All'.
+
+Panel transforms & thresholds:
+	•	Use Reduce → Last (not null) for stat panels.
+	•	Use Thresholds on like/error rates (e.g., red > 0.25 error_rate).
+	•	For tables, enable Data links to your internal console:
+Example: link to /conversations/${__data.fields.conversation_id} or prompt viewer /prompts/${__data.fields.prompt_id}.
+
+⸻
+
+Automation or Future Improvements (optional)
+
+Data integrity / ETL guardrails
+	•	Add a nightly standardization job (MongoDB $merge to *_std collections) that:
+	•	Normalizes keys (promptld→prompt_id, chat id→conversation_id, trim conversation id).
+	•	Derives error_class, parsed client, and day.
+This stabilizes pipelines and speeds Grafana.
+
+Indexes (performance)
+	•	message_records: {timestamp:1}, {conversation_id:1}, {prompt_id:1}
+	•	conversation_feedbacks: {timestamp:1}, {conversation_id:1}
+	•	conversations: {created_at:1}, {user_id:1}, {user_agent:1}
+	•	message_feedbacks: {timestamp:1}, {prompt_id:1}, {conversation_id:1}
+
+Alerting (Grafana)
+	•	Error Rate Spike: alert if 1-hour error_rate > 15% and error_system increases >3× baseline.
+	•	Entitlement Misuse: alert if daily error_entitlement > threshold (potential access pattern issue).
+	•	Helpfulness Drop: alert if 7-day helpfulness_rate falls below 60%.
+
+Drilldowns
+	•	Click a time-bucket → dashboard-to-dashboard navigation passing time range + filters to a “Conversation Explorer” with a table of raw message_records for that slice.
+
+Privacy
+	•	Mask PII in userMessage table views (store only snippets or hash). Keep full text only in privileged debug dashboards.
+
+Model/version slicing (when available)
+	•	Add model_version to message_records and split all key charts by version to measure regressions.
+
+⸻
+
+Why this works (Evaluation Dimensions)
+	•	Data Integrity & Schema Mapping: Pipelines explicitly normalize inconsistent keys and join collections on stable IDs.
+	•	Metric Relevance: Helpfulness/like/error rates directly track GenAI quality; prompt and client breakdowns support product decisions; entitlement/system errors separate policy vs reliability issues.
+	•	Visualization Effectiveness: Time series for trends; stacked errors for composition; tables for triage; stat tiles for exec readouts; client/user bars for adoption insights.
+	•	Scalability & Maintenance: Index guidance, nightly standardization with $merge, variable-driven filters, and modular pipelines make it easy to extend and keep fast as volume grows.
+
+If you want, I can tailor the pipelines to your exact field names as-is (without normalization) and provide copy-paste JSON for each Grafana panel.

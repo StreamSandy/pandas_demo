@@ -1,3 +1,404 @@
+
+Gotcha. Since your editor shows `db.collection_name.find()` and can also run `db.collection_name.aggregate()`, we’ll use the **shell-style aggregate** form for every key metric—no “Pipeline mode” needed. Below are **copy-paste** queries plus quick steps to wire each into a Grafana panel. I’ll also show how to add variables so filters work cleanly.
+
+---
+
+# Before you start (one-time prep)
+
+## A) Add 2 handy dashboard variables
+
+1. **User filter**
+
+* Dashboard settings → **Variables** → **Add**
+* **Name:** `user`
+* **Type:** Query → Data source: *MongoDB* → **Collection:** `conversations`
+* **Query (aggregate):**
+
+  ```javascript
+  db.conversations.aggregate([
+    { $match: { user_id: { $exists: true, $ne: null } } },
+    { $group: { _id: "$user_id" } },
+    { $project: { text: "$_id", value: "$_id", _id: 0 } },
+    { $sort: { text: 1 } }
+  ])
+  ```
+* **Include All option:** Enabled
+* **Custom all value:** `.*`  (so “All” expands to a regex that matches everything)
+
+2. **Client filter** (optional)
+
+* Same steps, **Name:** `client`
+* **Query (aggregate):**
+
+  ```javascript
+  db.conversations.aggregate([
+    { $match: { user_agent: { $exists: true, $ne: null } } },
+    { $set: { client: { $trim: { input: { $first: { $split: ["$user_agent", "/"] } } } } } },
+    { $group: { _id: "$client" } },
+    { $project: { text: "$_id", value: "$_id", _id: 0 } },
+    { $sort: { text: 1 } }
+  ])
+  ```
+* **Include All:** Enabled; **Custom all value:** `.*`
+
+> We’ll use these variables inside `$regex` filters so **All = `.*`** matches everything.
+
+## B) Time range
+
+Grafana injects `__$from`/`__$to` (or `$__from`/`$__to` depending on plugin) as **ms since epoch**. We’ll use `{$toDate: "$__from"}` and `{$toDate: "$__to"}`. If your plugin uses `__$from`, just swap accordingly.
+
+---
+
+# 1) Daily Active Conversations (DAC) & Messages (time series)
+
+**Collection:** `message_records`
+**Panel:** Time series (two lines: DAC, Messages)
+
+```javascript
+db.message_records.aggregate([
+  { $match: {
+      timestamp: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } },
+      conversation_id: { $exists: true, $ne: null }
+  }},
+  // Optional user filter via conversations join
+  { $lookup: {
+      from: "conversations",
+      localField: "conversation_id",
+      foreignField: "conversation_id",
+      as: "conv"
+  }},
+  { $match: { "conv.user_id": { $regex: "^$user$" } } }, // $user = .* matches all
+  { $project: {
+      day: { $dateTrunc: { date: "$timestamp", unit: "day" } },
+      conversation_id: 1
+  }},
+  { $group: {
+      _id: "$day",
+      conversations: { $addToSet: "$conversation_id" },
+      messages: { $sum: 1 }
+  }},
+  { $project: {
+      _id: 0,
+      time: "$_id",
+      daily_active_conversations: { $size: "$conversations" },
+      messages: 1
+  }},
+  { $sort: { time: 1 } }
+])
+```
+
+---
+
+# 2) Helpfulness Rate over time (conversation-level feedback)
+
+**Collection:** `conversation_feedbacks`
+**Panel:** Time series (%)
+
+```javascript
+db.conversation_feedbacks.aggregate([
+  { $match: {
+      timestamp: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } }
+  }},
+  // Optional user filter by joining to conversations
+  { $lookup: {
+      from: "conversations",
+      localField: "conversation id",         // adjust to your exact key
+      foreignField: "conversation_id",
+      as: "conv"
+  }},
+  { $match: { "conv.user_id": { $regex: "^$user$" } } },
+  { $project: {
+      day: { $dateTrunc: { date: "$timestamp", unit: "day" } },
+      helpful: { $toBool: "$helpful" }
+  }},
+  { $group: {
+      _id: "$day",
+      total: { $sum: 1 },
+      helpful_count: { $sum: { $cond: ["$helpful", 1, 0] } }
+  }},
+  { $project: {
+      _id: 0,
+      time: "$_id",
+      helpfulness_rate: {
+        $cond: [{ $gt: ["$total", 0] }, { $divide: ["$helpful_count", "$total"] }, 0]
+      }
+  }},
+  { $sort: { time: 1 } }
+])
+```
+
+---
+
+# 3) Errors by class & Error Rate (time series, stacked + line)
+
+**Collection:** `message_records`
+**Panel:** Stacked time series per class + line for error_rate
+
+```javascript
+db.message_records.aggregate([
+  { $match: {
+      timestamp: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } },
+      conversation_id: { $exists: true, $ne: null },
+      agentResponse: { $exists: true, $ne: null }
+  }},
+  { $lookup: {
+      from: "conversations",
+      localField: "conversation_id",
+      foreignField: "conversation_id",
+      as: "conv"
+  }},
+  { $match: { "conv.user_id": { $regex: "^$user$" } } },
+  { $set: {
+      error_class: {
+        $switch: {
+          branches: [
+            { case: { $regexMatch: { input: "$agentResponse", regex: "entitlement|required entitlements", options: "i" } }, then: "error_entitlement" },
+            { case: { $regexMatch: { input: "$agentResponse", regex: "error processing|system error|internal server", options: "i" } }, then: "error_system" },
+            { case: { $regexMatch: { input: "$agentResponse", regex: "cannot fulfill this request|policy|restricted", options: "i" } }, then: "error_policy" }
+          ],
+          default: "ok"
+        }
+      },
+      day: { $dateTrunc: { date: "$timestamp", unit: "day" } }
+  }},
+  { $group: { _id: { day: "$day", error_class: "$error_class" }, count: { $sum: 1 } } },
+  { $group: {
+      _id: "$_id.day",
+      by_class: { $push: { k: "$_id.error_class", v: "$count" } },
+      total: { $sum: "$count" }
+  }},
+  { $project: {
+      _id: 0,
+      time: "$_id",
+      error_entitlement: { $ifNull: [ { $getField: { field: "error_entitlement", input: { $arrayToObject: "$by_class" } } }, 0 ] },
+      error_system:      { $ifNull: [ { $getField: { field: "error_system",      input: { $arrayToObject: "$by_class" } } }, 0 ] },
+      error_policy:      { $ifNull: [ { $getField: { field: "error_policy",      input: { $arrayToObject: "$by_class" } } }, 0 ] },
+      ok:                { $ifNull: [ { $getField: { field: "ok",                input: { $arrayToObject: "$by_class" } } }, 0 ] },
+      error_rate: {
+        $cond: [
+          { $gt: ["$total", 0] },
+          { $divide: [ { $add: ["$error_entitlement", "$error_system", "$error_policy"] }, "$total" ] },
+          0
+        ]
+      }
+  }},
+  { $sort: { time: 1 } }
+])
+```
+
+---
+
+# 4) Client Mix (donut/pie or horizontal bar)
+
+**Collection:** `conversations`
+**Panel:** Pie/Donut (or Bar)
+
+```javascript
+db.conversations.aggregate([
+  { $match: {
+      created_at: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } }
+  }},
+  { $set: {
+      client: { $trim: { input: { $first: { $split: ["$user_agent", "/"] } } } }
+  }},
+  { $match: { client: { $regex: "^$client$" } } }, // $client = .* matches all
+  { $group: { _id: "$client", count: { $sum: 1 } } },
+  { $project: { _id: 0, client: "$_id", count: 1 } },
+  { $sort: { count: -1 } }
+])
+```
+
+---
+
+# 5) Prompt Performance (table)
+
+**Collection:** `message_records`
+**Panel:** Table (columns: prompt_id, calls, like_rate, error_rate, sample_prompt)
+
+```javascript
+db.message_records.aggregate([
+  { $match: {
+      timestamp: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } },
+      prompt_id: { $exists: true, $ne: null }
+  }},
+  { $lookup: {
+      from: "conversations",
+      localField: "conversation_id",
+      foreignField: "conversation_id",
+      as: "conv"
+  }},
+  { $match: { "conv.user_id": { $regex: "^$user$" } } },
+  { $lookup: {
+      from: "message_feedbacks",
+      let: { pid: "$prompt_id" },
+      pipeline: [
+        { $match: { $expr: { $eq: ["$prompt_id", "$$pid"] } } },
+        { $project: { liked: { $toBool: "$liked" } } }
+      ],
+      as: "mf"
+  }},
+  { $set: {
+      liked_count: {
+        $size: {
+          $filter: { input: "$mf", as: "m", cond: "$$m.liked" }
+        }
+      },
+      error_flag: {
+        $regexMatch: { input: "$agentResponse", regex: "error|cannot fulfill|entitlement|restricted", options: "i" }
+      }
+  }},
+  { $group: {
+      _id: "$prompt_id",
+      calls: { $sum: 1 },
+      likes: { $sum: "$liked_count" },
+      errors: { $sum: { $cond: ["$error_flag", 1, 0] } },
+      sample_prompt: { $first: "$userMessage" }
+  }},
+  { $project: {
+      _id: 0,
+      prompt_id: "$_id",
+      calls: 1,
+      like_rate: { $cond: [ { $gt: ["$calls", 0] }, { $divide: ["$likes", "$calls"] }, 0 ] },
+      error_rate: { $cond: [ { $gt: ["$calls", 0] }, { $divide: ["$errors", "$calls"] }, 0 ] },
+      sample_prompt: 1
+  }},
+  { $sort: { error_rate: -1, calls: -1 } },
+  { $limit: 50 }
+])
+```
+
+---
+
+# 6) User Adoption / Leaderboard (bar or table)
+
+**Collection:** `conversations`
+**Panel:** Bar (Top users by conversation count) or Table
+
+```javascript
+db.conversations.aggregate([
+  { $match: {
+      created_at: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } }
+  }},
+  { $match: { user_id: { $regex: "^$user$" } } },
+  { $group: { _id: "$user_id", conversations: { $addToSet: "$conversation_id" } } },
+  { $project: { user_id: "$_id", conv_count: { $size: "$conversations" }, _id: 0 } },
+  { $lookup: {
+      from: "users",
+      localField: "user_id",
+      foreignField: "user_id",
+      as: "u"
+  }},
+  { $set: {
+      user_email: { $ifNull: [ { $arrayElemAt: ["$u.email", 0] }, "" ] },
+      user_name: {
+        $concat: [
+          { $ifNull: [ { $arrayElemAt: ["$u.first_name", 0] }, "" ] },
+          " ",
+          { $ifNull: [ { $arrayElemAt: ["$u.last_name", 0] }, "" ] }
+        ]
+      }
+  }},
+  { $project: { user_id: 1, user_email: 1, user_name: 1, conv_count: 1 } },
+  { $sort: { conv_count: -1 } },
+  { $limit: 25 }
+])
+```
+
+---
+
+# 7) Negative Feedback Triage (latest items)
+
+**Collection:** `message_feedbacks`
+**Panel:** Table
+
+```javascript
+db.message_feedbacks.aggregate([
+  { $match: {
+      timestamp: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } },
+      liked: { $in: [false, 0, "false"] },
+      feedback: { $exists: true, $ne: null }
+  }},
+  // optional: filter by user via prompt->message_records join (if needed)
+  { $sort: { timestamp: -1 } },
+  { $limit: 50 },
+  { $project: {
+      _id: 0,
+      timestamp: 1,
+      prompt_id: 1,
+      feedback: 1,
+      response_snippet: { $substr: ["$response", 0, 160] }
+  }}
+])
+```
+
+---
+
+# 8) Recent Conversation Feedback (table)
+
+**Collection:** `conversation_feedbacks`
+**Panel:** Table
+
+```javascript
+db.conversation_feedbacks.aggregate([
+  { $match: {
+      timestamp: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } }
+  }},
+  { $lookup: {
+      from: "conversations",
+      localField: "conversation id",  // adjust to your exact key
+      foreignField: "conversation_id",
+      as: "conv"
+  }},
+  { $match: { "conv.user_id": { $regex: "^$user$" } } },
+  { $project: {
+      _id: 0,
+      timestamp: 1,
+      conversation_id: "$conversation id",
+      message_seq_num: "$message sed num", // adjust to your field name
+      helpful: { $toBool: "$helpful" },
+      feedback: 1
+  }},
+  { $sort: { timestamp: -1 } },
+  { $limit: 100 }
+])
+```
+
+---
+
+## Panel wiring (quick steps for each)
+
+1. **Add panel** → Data source: *MongoDB* → Query box
+2. Paste the **aggregate** query.
+3. Click **Run query**.
+4. Right panel **Visualization**:
+
+   * Time series for anything outputting `time` + numeric fields
+   * Table for triage/feedback/prompt metrics
+   * Pie/Bar for client mix or top users
+5. For **Time series**, ensure your query outputs a field named **`time`** (done above).
+6. Save panel → Save dashboard.
+
+---
+
+## Performance tips (important at scale)
+
+* Indexes:
+
+  * `message_records`: `{ timestamp: 1 }`, `{ conversation_id: 1 }`, `{ prompt_id: 1 }`
+  * `conversation_feedbacks`: `{ timestamp: 1 }`, `{ conversation id: 1 }`
+  * `conversations`: `{ created_at: 1 }`, `{ user_id: 1 }`
+  * `message_feedbacks`: `{ timestamp: 1 }`, `{ prompt_id: 1 }`
+* If queries get heavy, **pre-aggregate** nightly and have Grafana read the “facts” collections.
+* Normalize inconsistent keys (`conversation id` vs `conversation_id`, `promptld` vs `prompt_id`) in an ETL step or via `$set` in queries.
+
+---
+
+If you hit any plugin quirks (e.g., it expects `__$from`/`__$to` not `$__from`/`$__to`, or regex anchors behave differently), tell me what you see in the query inspector and I’ll adjust the snippets precisely for your editor.
+
+
+>>>>>>>>>>>>>>>>>>
+
+
 Got it—let’s turn your MongoDB collections into a crisp, actionable Grafana dashboard for a GenAI conversational-analytics platform. I’ll assume Grafana’s MongoDB data source is already wired and that panels can run native aggregation pipelines.
 
 Overview of Data Understanding

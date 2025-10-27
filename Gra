@@ -1,4 +1,268 @@
+>>>>>>>>>>>>>>>>>>>>
+11:26
 
+Yes — you can absolutely run the **MongoDB aggregate queries directly**, without using Grafana dashboard variables (`$user`, `$client`, etc.).
+Let’s simplify everything into **static queries** you can paste straight into the **Query Editor** (using `db.collection_name.aggregate([...])` syntax).
+
+Below is how to do it **step-by-step** for the main panels, assuming:
+
+* You only want to use the time range selector (Grafana will still pass `$__from` / `$__to`)
+* You don’t need filters like `$user` or `$client`
+
+---
+
+## 🧩 1️⃣ Daily Active Conversations & Messages (Time series)
+
+**Collection:** `message_records`
+**Panel type:** Time series
+
+```javascript
+db.message_records.aggregate([
+  { $match: {
+      timestamp: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } },
+      conversation_id: { $exists: true, $ne: null }
+  }},
+  { $project: {
+      day: { $dateTrunc: { date: "$timestamp", unit: "day" } },
+      conversation_id: 1
+  }},
+  { $group: {
+      _id: "$day",
+      conversations: { $addToSet: "$conversation_id" },
+      messages: { $sum: 1 }
+  }},
+  { $project: {
+      _id: 0,
+      time: "$_id",
+      daily_active_conversations: { $size: "$conversations" },
+      messages: 1
+  }},
+  { $sort: { time: 1 } }
+])
+```
+
+✅ **Grafana setup**
+
+1. Open a new panel → Data source: *MongoDB*
+2. Paste this in the query editor
+3. Run → You should see 3 columns: `time`, `daily_active_conversations`, `messages`
+4. Visualization → “Time series”
+5. Style → Show both lines
+
+---
+
+## 🧩 2️⃣ Helpfulness Rate over Time
+
+**Collection:** `conversation_feedbacks`
+**Panel type:** Time series (%)
+
+```javascript
+db.conversation_feedbacks.aggregate([
+  { $match: {
+      timestamp: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } }
+  }},
+  { $project: {
+      day: { $dateTrunc: { date: "$timestamp", unit: "day" } },
+      helpful: { $toBool: "$helpful" }
+  }},
+  { $group: {
+      _id: "$day",
+      total: { $sum: 1 },
+      helpful_count: { $sum: { $cond: ["$helpful", 1, 0] } }
+  }},
+  { $project: {
+      _id: 0,
+      time: "$_id",
+      helpfulness_rate: {
+        $cond: [{ $gt: ["$total", 0] }, { $divide: ["$helpful_count", "$total"] }, 0]
+      }
+  }},
+  { $sort: { time: 1 } }
+])
+```
+
+✅ **Visualization:** Time series
+Y-axis as percentage, add unit “percent (0-1)” or multiply by 100 in a transform.
+
+---
+
+## 🧩 3️⃣ Error Rates by Type
+
+**Collection:** `message_records`
+**Panel type:** Stacked time series
+
+```javascript
+db.message_records.aggregate([
+  { $match: {
+      timestamp: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } },
+      agentResponse: { $exists: true, $ne: null }
+  }},
+  { $set: {
+      error_class: {
+        $switch: {
+          branches: [
+            { case: { $regexMatch: { input: "$agentResponse", regex: "entitlement|required entitlements", options: "i" } }, then: "error_entitlement" },
+            { case: { $regexMatch: { input: "$agentResponse", regex: "error processing|system error|internal server", options: "i" } }, then: "error_system" },
+            { case: { $regexMatch: { input: "$agentResponse", regex: "cannot fulfill|policy|restricted", options: "i" } }, then: "error_policy" }
+          ],
+          default: "ok"
+        }
+      },
+      day: { $dateTrunc: { date: "$timestamp", unit: "day" } }
+  }},
+  { $group: { _id: { day: "$day", error_class: "$error_class" }, count: { $sum: 1 } } },
+  { $group: {
+      _id: "$_id.day",
+      by_class: { $push: { k: "$_id.error_class", v: "$count" } },
+      total: { $sum: "$count" }
+  }},
+  { $project: {
+      _id: 0,
+      time: "$_id",
+      error_entitlement: { $ifNull: [ { $getField: { field: "error_entitlement", input: { $arrayToObject: "$by_class" } } }, 0 ] },
+      error_system:      { $ifNull: [ { $getField: { field: "error_system",      input: { $arrayToObject: "$by_class" } } }, 0 ] },
+      error_policy:      { $ifNull: [ { $getField: { field: "error_policy",      input: { $arrayToObject: "$by_class" } } }, 0 ] },
+      ok:                { $ifNull: [ { $getField: { field: "ok",                input: { $arrayToObject: "$by_class" } } }, 0 ] },
+      error_rate: {
+        $cond: [
+          { $gt: ["$total", 0] },
+          { $divide: [ { $add: ["$error_entitlement", "$error_system", "$error_policy"] }, "$total" ] },
+          0
+        ]
+      }
+  }},
+  { $sort: { time: 1 } }
+])
+```
+
+✅ **Visualization:**
+
+* Stacked area for `error_entitlement`, `error_system`, `error_policy`
+* Separate line for `error_rate` (use “Transform → Organize fields” to keep only relevant ones).
+
+---
+
+## 🧩 4️⃣ Client Mix (Pie / Donut)
+
+**Collection:** `conversations`
+
+```javascript
+db.conversations.aggregate([
+  { $match: {
+      created_at: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } }
+  }},
+  { $set: {
+      client: { $trim: { input: { $first: { $split: ["$user_agent", "/"] } } } }
+  }},
+  { $group: { _id: "$client", count: { $sum: 1 } } },
+  { $project: { _id: 0, client: "$_id", count: 1 } },
+  { $sort: { count: -1 } }
+])
+```
+
+✅ **Visualization:** Pie chart (label = `client`, value = `count`)
+
+---
+
+## 🧩 5️⃣ Top Users (Table or Bar)
+
+**Collection:** `conversations`
+
+```javascript
+db.conversations.aggregate([
+  { $match: {
+      created_at: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } }
+  }},
+  { $group: { _id: "$user_id", conversations: { $addToSet: "$conversation_id" } } },
+  { $project: { user_id: "$_id", conv_count: { $size: "$conversations" }, _id: 0 } },
+  { $lookup: {
+      from: "users",
+      localField: "user_id",
+      foreignField: "user_id",
+      as: "user"
+  }},
+  { $set: {
+      user_name: {
+        $concat: [
+          { $ifNull: [ { $arrayElemAt: ["$user.first_name", 0] }, "" ] },
+          " ",
+          { $ifNull: [ { $arrayElemAt: ["$user.last_name", 0] }, "" ] }
+        ]
+      }
+  }},
+  { $project: { user_name: 1, conv_count: 1 } },
+  { $sort: { conv_count: -1 } },
+  { $limit: 20 }
+])
+```
+
+✅ **Visualization:** Horizontal bar (Y = user_name, X = conv_count)
+
+---
+
+## 🧩 6️⃣ Recent Feedback (Table)
+
+**Collection:** `message_feedbacks`
+
+```javascript
+db.message_feedbacks.aggregate([
+  { $match: {
+      timestamp: { $gte: { $toDate: "$__from" }, $lte: { $toDate: "$__to" } },
+      feedback: { $exists: true, $ne: null }
+  }},
+  { $sort: { timestamp: -1 } },
+  { $limit: 50 },
+  { $project: {
+      _id: 0,
+      timestamp: 1,
+      prompt_id: 1,
+      liked: 1,
+      feedback: 1,
+      response_snippet: { $substr: ["$response", 0, 120] }
+  }}
+])
+```
+
+✅ **Visualization:** Table (columns: timestamp, liked, feedback, response_snippet)
+
+---
+
+## 🧭 How to Enter These in Grafana (no variables)
+
+1. Go to your dashboard → **Add panel**
+2. Choose **MongoDB** data source
+3. In the **query editor**, replace default:
+
+   ```
+   db.collection_name.find()
+   ```
+
+   with:
+
+   ```
+   db.collection_name.aggregate([...])
+   ```
+
+   (Paste one of the snippets above)
+4. Click **Run query**
+5. Choose your visualization type
+6. Save the panel ✅
+
+---
+
+## 🧠 Pro Tips
+
+* Grafana automatically injects `$__from` / `$__to` based on the time picker.
+  You can confirm values under “Query inspector → Raw query”.
+* If your plugin doesn’t accept `$__from` directly, try `__$from` and `__$to`.
+* You can duplicate panels and replace the collection/query snippet to build out the full dashboard quickly.
+
+---
+
+Would you like me to give you a **final dashboard layout plan** (row-by-row with panel titles and visuals) for these no-variable queries — so you can import it into Grafana as a JSON model later?
+
+
+>>>>>>>>>>>>>>>>>>>>>
 Gotcha. Since your editor shows `db.collection_name.find()` and can also run `db.collection_name.aggregate()`, we’ll use the **shell-style aggregate** form for every key metric—no “Pipeline mode” needed. Below are **copy-paste** queries plus quick steps to wire each into a Grafana panel. I’ll also show how to add variables so filters work cleanly.
 
 ---

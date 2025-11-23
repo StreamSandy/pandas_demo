@@ -1,6 +1,100 @@
 
 
+ 23 nov 10:30
+Nice additions — those two asks are very “principal engineer”:
+	•	classify owned vs external endpoints, and
+	•	give step-by-step commands to test locally after switching to localhost.
 
+Here’s the updated zero-shot prompt with those bits cleanly woven in.
+
+⸻
+
+Updated Zero-Shot Instruction Prompt
+
+Role
+You are a senior backend/infra engineer in a high-performing PE team working on an LLM chatbot application. Think like someone at a billion-dollar startup: you care about correctness, clarity, and minimal, safe changes.
+
+Context
+	•	We have a Python-based LLM chatbot application with multiple API endpoints.
+	•	There is a deployment script and several application/route/config scripts.
+	•	I want to understand how values are populated, how endpoints are wired, and how to extend health checks safely while being able to run and test everything on localhost.
+
+What I will provide
+I will paste:
+	•	The deployment script(s) for the LLM chatbot application.
+	•	The main app/server/route scripts that define the API endpoints.
+	•	Any config/env handling modules if they exist.
+
+Your tasks (step-by-step)
+	1.	Endpoint Discovery & Classification
+	•	Analyse each script I provide and list all API endpoints.
+	•	For each endpoint, specify:
+	•	HTTP method (GET/POST/PUT/etc.)
+	•	Path (e.g. /chat, /health, /v1/messages)
+	•	File (and function/handler name if clear)
+	•	One-line description of what it does (based on code)
+	•	Ownership:
+	•	Mark as “OWNED” if this endpoint is implemented by our service (we define the handler).
+	•	Mark as “EXTERNAL” if it is an upstream endpoint we are calling/consuming from another service or provider (e.g. OpenAI, internal LLM service, other microservice).
+	2.	Value Population / Configuration Flow
+	•	Explain how important values are getting populated, especially:
+	•	Hostnames / base URLs / ports
+	•	LLM endpoint URLs
+	•	Any config flags that affect routing or behavior
+	•	For each value, tell me where it comes from (e.g., environment variable, config file, default constant, CLI arg).
+	•	Summarize this as a short “config/value flow” section that helps me understand how the deployment script wires everything together.
+	3.	Existing Health-Check Logic
+	•	Identify any existing health / readiness / status endpoints. For each, describe:
+	•	Path + method
+	•	What checks it performs (e.g., does it ping the LLM, DB, cache, etc.?)
+	•	How it returns the result (status code + response body format).
+	•	From this, infer the standard health-check pattern already used in this application (for example: simple 200 OK, JSON with status field, etc.).
+	4.	Health-Check Extension Plan (No New Logic)
+	•	For endpoints that do not have health checks associated with them, propose a plan to add or reuse health-check endpoints.
+	•	Do not create any new business logic.
+	•	If a health-check is already available for the same shared dependencies (e.g., same LLM client or DB), re-use that logic or pattern.
+	•	Be explicit about:
+	•	Which file(s) to modify
+	•	Which existing functions/handlers to reuse or call
+	•	Any new route definitions required, written in the same style as existing health routes
+	•	Focus on a minimal, safe change set that a production team would be comfortable with.
+	5.	Localhost Testing Plan (Changing Host to localhost)
+	•	Analyse where the host/base URL and related settings are defined (deployment script, env vars, config objects, hard-coded constants).
+	•	Provide a clear plan for switching the application and/or its upstream calls to localhost for local testing, including:
+	•	Which environment variables or config values to change (with example values, e.g. BASE_URL="http://localhost:8000").
+	•	Which code lines or config sections would need edits if any values are hard-coded.
+	•	How to ensure health-check endpoints also work correctly against localhost.
+	6.	Step-by-Step Commands to Test on Localhost
+	•	After proposing the localhost configuration changes, give me a step-by-step sequence of commands to test the service locally, such as:
+	•	Commands to export environment variables / activate virtualenv
+	•	Command to start the server (e.g. uvicorn main:app --reload --host 0.0.0.0 --port 8000)
+	•	curl / httpie examples (or similar) to:
+	•	Hit the main chatbot endpoint(s)
+	•	Hit the health-check endpoint(s)
+	•	Optionally hit any other critical endpoints we own
+	•	The commands should assume a typical local dev environment (Linux/macOS shell) and be immediately runnable.
+
+Constraints
+	•	Do not invent entirely new health-check logic; reuse or lightly adapt existing patterns already present in the code.
+	•	Do not redesign the architecture; keep changes minimal and focused on health checks and localhost configurability.
+	•	Assume Python < 3.11 unless the code clearly shows otherwise.
+	•	Explain your reasoning briefly but clearly, as if writing review notes for a principal engineer.
+
+Output Format
+	•	Section 1 – Endpoint Inventory & Ownership: table of
+	•	METHOD | PATH | FILE | HANDLER | OWNED/EXTERNAL | BRIEF PURPOSE.
+	•	Section 2 – Config & Value Flow: short explanation of how hosts/base URLs/ports and key config values are populated.
+	•	Section 3 – Existing Health-Check Pattern: description of existing health endpoints and the inferred standard pattern.
+	•	Section 4 – Health-Check Extension Plan: bullet list of concrete steps + which files/functions/paths to touch, and high-level code snippets (no big refactors).
+	•	Section 5 – Localhost Testing Plan:
+	•	(a) config/code changes required to run on localhost, and how to revert them.
+	•	(b) step-by-step shell commands to start the app locally and test key endpoints (chat + health).
+	•	Section 6 – Assumptions / Open Questions: list any assumptions you had to make or clarifications I should provide.
+
+⸻
+
+If you want, next step you can paste your main app + router + deployment script, and we can “dry run” this prompt together so you see exactly the kind of output it will drive.
+>>>>>>>>>>>>>
 
 Nice, this is shaping up into a very solid zero-shot use case 👌
 

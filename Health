@@ -1,5 +1,120 @@
 
 
+1:30 PM
+>>>>>>>>>>>>>>>>>>>>>>>>>>.
+
+
+---
+
+You are a senior Python backend engineer working on a GenAI feedback management system. Your tech stack includes:
+
+* **FastAPI**
+* **MongoDB** (already connected in `src/db/mongo_client.py`)
+* **React-based Admin UI** (calls backend REST endpoints)
+* **pytest + coverage tools** for unit testing
+
+---
+
+### 🧩 Your Task
+
+Create a new **REST API endpoint** to export feedback data for admin analysis.
+
+---
+
+### 🔧 Endpoint Specification
+
+| Field             | Value                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| **Method**        | `GET`                                                                                   |
+| **Route**         | `/feedback`                                                                             |
+| **Description**   | Fetch all feedback from MongoDB and return as a **CSV file**, excluding the `_id` field |
+| **Response Type** | `text/csv` download                                                                     |
+| **Consumer**      | React-based Admin UI (done by another team)                                             |
+| **Security**      | Assume internal admin use only — secure via API key if applicable                       |
+| **Performance**   | Assume ≤10,000 records — no pagination needed for now, but allow easy upgrade path      |
+
+---
+
+### 🧱 Constraints
+
+* ✅ **Do NOT reimplement** MongoDB connection logic — reuse from `src/db/mongo_client.py`
+* ✅ Follow existing **design patterns** in `/src`
+
+  * Logging
+  * Error handling
+  * Router structure
+  * Dependency injection (if any)
+* ✅ Use **DRY principles** — do not duplicate logic for model serialization, error wrapping, etc.
+* 🚫 Do not invent new decorators, base classes, or structure changes
+
+---
+
+### 📦 Sample Feedback Document (MongoDB)
+
+```json
+{
+  "_id": ObjectId("..."),
+  "Timestamp": "2025-11-28T16:21:44.044Z",
+  "Liked": true,
+  "Feedback": "Thanks much. But citation doesn’t provide any links",
+  "prompt_id": "abc123",
+  "Prompt": "Tell me about Factset and how to use it",
+  "Response": "Sure, here's how...",
+  "User": "A12345",
+  "chat_id": "fdfererer"
+}
+```
+
+Exclude the `_id` field in export.
+
+---
+
+### 📄 Sample CSV Output
+
+```
+Timestamp,Liked,Feedback,prompt_id,Prompt,Response,User,chat_id
+2025-11-28T16:21:44.044Z,true,"Thanks much. But citation…",abc123,"Tell me…","Sure…",A12345,fdfererer
+```
+
+---
+
+### 🧪 Unit Testing Requirements
+
+* Create a test module: `tests/test_feedback_export.py`
+* Use `mongomock` or patching to mock MongoDB responses
+* Cover:
+
+  * ✅ Valid CSV generation
+  * ✅ Missing fields handling
+  * ✅ 200 OK status with correct headers
+  * ✅ Non-200 error if Mongo connection fails
+* Achieve **100% coverage** for this endpoint
+
+---
+
+### 🧩 Bonus if You Can Detect
+
+* Match the CSV field order with prior exports (if a pattern exists in `/src`)
+* Ensure the endpoint **returns proper headers** for file download:
+
+```http
+Content-Type: text/csv  
+Content-Disposition: attachment; filename=feedback.csv
+```
+
+---
+
+### Output Format:
+
+1. Python code for FastAPI endpoint
+2. CSV formatting helper (if needed)
+3. Unit test code
+4. Mention of reused imports/utilities
+5. Assumptions made
+
+
+
+>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 ---
 

@@ -1,5 +1,110 @@
 
 
+
+---
+
+You are a senior backend engineer with deep understanding of production-grade API design, DRY principles, and code quality enforcement.
+
+You are working on a **GenAI feedback pipeline project**, where feedback is stored in a **MongoDB collection**. Your task is to add a new feature with full test coverage.
+
+---
+
+### 🧩 Task:
+
+Create a new REST endpoint:
+**`GET /feedback`**
+This endpoint fetches all feedback records from MongoDB, **removes the `_id` field**, and returns the data as a **CSV file download**.
+
+---
+
+### 📚 Input:
+
+* Feedback is stored in a MongoDB collection with documents like:
+
+```json
+{
+  "_id": ObjectId(...),
+  "Timestamp": "2025-11-28T16:21:44.044Z",
+  "Liked": true,
+  "Feedback": "Thanks much. But citation doesn’t provide any links",
+  "prompt_id": "...",
+  "Prompt": "Tell me about Factset and how to use it",
+  "Response": "...",
+  "User": "A12345",
+  "chat_id": "fdfererer"
+}
+```
+
+---
+
+### 📁 Codebase Context:
+
+* Code is located under `/src`
+* MongoDB connection is already implemented in:
+  `src/db/mongo_client.py`
+* API framework: **FastAPI**
+* Test framework: **pytest** (with `pytest-cov` and `mongomock`)
+* Adhere to **existing design principles**, logging, and response schema patterns in `/src`
+* Follow **DRY principles**: do not re-implement Mongo connection or exception handling logic.
+
+---
+
+### 🧪 Requirements:
+
+1. **GET /feedback endpoint**
+
+   * Reuse existing Mongo connection and DB selection logic
+   * Fetch all documents
+   * Remove `_id` field
+   * Convert documents to CSV
+   * Return CSV as downloadable file with appropriate headers (`text/csv`, `attachment; filename=feedback.csv`)
+
+2. **Design alignment**
+
+   * Follow routing, error handling, and logging style from `/src`
+   * Do not invent new abstractions or frameworks
+
+3. **Security / Performance**
+
+   * Limit export size if large (e.g., paginate or stream large responses if applicable)
+   * Ensure UTF-8 safe CSV
+
+4. **Testing**
+
+   * Write unit test in `tests/test_feedback_export.py`
+   * Use fixtures to mock MongoDB response
+   * Cover:
+
+     * CSV formatting correctness
+     * Header checks
+     * 200 OK status
+   * Achieve **100% code coverage** for the endpoint
+
+---
+
+### ✅ Output Format:
+
+* Endpoint code (in FastAPI-style controller)
+* CSV builder code if applicable
+* Unit test file with coverage
+* Mention any assumptions you made (e.g., about DB name or CSV encoding)
+
+---
+
+## ✅ Bonus Add-On
+
+If available, infer:
+
+* How logging is handled (`logger.info`, `logger.error`)
+* Whether API responses use a wrapper (e.g., `SuccessResponse(data=...)`)
+* Which environment variable or config defines DB/collection
+
+---
+
+Would you like me to generate the actual FastAPI code + test suite for this prompt now? Or do you want to try using this prompt with your internal Copilot or LLM first?
+
+>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
  23 nov 10:30
 Nice additions — those two asks are very “principal engineer”:
 	•	classify owned vs external endpoints, and

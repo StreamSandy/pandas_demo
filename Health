@@ -1,4 +1,210 @@
 
+04th march:
+
+Here’s a much stronger **zero-shot instruction prompt** you can paste into an “instructions task” to get a top agent to (a) understand your existing retrieval eval script end-to-end and (b) design + implement a **generation benchmarking** framework with LLM-as-a-judge for **relevancy** and **faithfulness**, plus SME + latency, and produce the requested artifacts.
+
+You can copy this as-is and then replace placeholders.
+
+---
+
+## Improved zero-shot instruction prompt (copy/paste)
+
+You are a principal ML evaluation engineer. Your job is to (1) deeply understand an existing retrieval benchmarking codebase written by another engineer, and (2) extend it to support a new “Generation Benchmarking” evaluation workflow.
+You must be rigorous, production-minded, and explicit about assumptions and gaps.
+
+### Context
+
+* I already have a retrieval benchmarking script that evaluates:
+
+  * retrieval relevancy
+  * cosine similarity
+* The code was written by another employee.
+* I need you to read it top-to-bottom and explain it, then modify/extend it to implement a new **generation benchmarking** pipeline.
+
+### Inputs I will provide
+
+* Existing code repository / script files (you must inspect them directly)
+* A base set of validation queries (not for benchmarking yet)
+* Access to LLM providers needed for generation + judging (Gemini 2.0 Flash, Gemini 2.5 Pro)
+
+### Target outcome
+
+Build a **generation benchmarking** framework that supports:
+
+* LLM model comparison (Gemini 2.0 Flash vs Gemini 2.5 Pro)
+* A fixed system prompt (unless Chapter 4 tuning parameters exist; then include them as benchmark dimensions)
+* LLM-as-a-judge evaluation:
+
+  1. Generation Relevancy
+  2. Generation Faithfulness (groundedness to provided sources/citations)
+* SME approval as an additional signal (manual field)
+* Latency measurement (per run, and summarized)
+
+### Key definitions
+
+* **Golden dataset**: curated set of query cases with:
+
+  * query text
+  * context/sources used for generation (documents/snippets)
+  * expected answer (reference)
+  * expected citations (which sources should be cited)
+* **Benchmark “component/parameter”**: any controllable variable whose impact we measure (e.g., model choice, prompt variant, temperature, top_p, max_tokens, retrieval top_k if relevant, etc.)
+* **Alterations**: variations applied to base queries or config that expand into benchmark rows. The final result table must contain one row per (base query × alteration/config combination).
+
+### Hard requirements (must-do)
+
+1. **Code comprehension first**
+
+   * Read the existing retrieval benchmarking code end-to-end.
+   * Produce:
+
+     * a high-level architecture explanation
+     * a dataflow description (inputs → processing → outputs)
+     * the current metric computation logic
+     * how it stores results (files/DB/logging)
+     * how configs are handled
+     * how to safely extend it without breaking backward compatibility
+
+2. **Design the generation benchmarking architecture**
+
+   * Propose modular components and interfaces:
+
+     * dataset loader for golden dataset
+     * generator runner (Gemini model wrapper)
+     * judge runner (LLM-as-judge prompt + scoring)
+     * latency tracker
+     * result aggregator → dataframe → CSV/XLSX
+   * Keep the design minimal, testable, and production-grade.
+
+3. **Implement generation benchmarking**
+
+   * Provide working Python code with:
+
+     * clear folder structure
+     * config-driven parameterization
+     * reproducibility (seed where applicable)
+     * structured logging
+     * error handling + retries for LLM calls
+     * rate limit handling
+     * ability to run a single query or full dataset
+   * Output: dataframe saved as CSV and XLSX.
+
+4. **Evaluation prompt design (LLM as judge)**
+
+   * Create separate judge prompts for:
+
+     * Relevancy
+     * Faithfulness
+   * Include:
+
+     * scoring rubric (e.g., 1–5)
+     * strict criteria
+     * what constitutes failure
+     * how to handle missing citations
+     * how to handle partially correct answers
+   * The judge output must be machine-parseable JSON with fields:
+
+     * score
+     * rationale
+     * pass/fail (optional)
+     * extracted issues list
+     * citation correctness (for faithfulness)
+
+5. **Artifacts to produce (non-code deliverables)**
+   Produce these as Markdown files plus the generated results table:
+   A) `benchmark_parameters.md`
+
+   * list each benchmark parameter
+   * values used for each parameter
+   * rationale for including it
+     B) `chapter4_tuning.md`
+   * list tuning or parameters from Chapter 4 (if any)
+   * their chosen values and why
+   * note if NOT tuned (explicitly)
+     C) `evaluation_metrics.md`
+   * explain each metric in detail: relevancy, faithfulness, SME approval, latency
+   * include examples of scoring decisions
+     D) `judge_design.md`
+   * specify judge LLM used
+   * judge prompt(s)
+   * judgment criteria and process
+   * how you reduce judge variance (e.g., temperature=0, repeated judging, majority vote if needed)
+     E) Results file:
+   * `results.csv` and `results.xlsx` containing one row per benchmark run
+
+6. **Results table schema (must match)**
+   Your final dataframe must include at least these columns (you may add more):
+
+* run_id
+* timestamp
+* base_query_id
+* base_query_text
+* alteration_id / config_variant_id
+* model_name (Gemini 2.0 Flash / Gemini 2.5 Pro)
+* system_prompt_id
+* system_prompt_text (or hash)
+* generation_parameters (json string)
+* retrieved_context_ids (if retrieval is part of generation; else empty)
+* retrieved_context_text (optional or store reference)
+* expected_answer
+* expected_citations
+* generated_answer
+* generated_citations (as extracted)
+* judge_model_name
+* judge_prompt_version
+* relevancy_score
+* relevancy_rationale
+* faithfulness_score
+* faithfulness_rationale
+* sme_approved (blank by default; manual fill)
+* latency_ms
+* errors (if any)
+* notes
+
+### Constraints / non-goals
+
+* “Validation queries” exist but are not automatically part of benchmarking until they are converted into golden dataset items.
+* Do not create new database objects. Store artifacts in files (CSV/XLSX/MD/JSON).
+* Prefer minimal dependencies. Use pandas for dataframe.
+
+### Deliverable format
+
+Return:
+
+1. A short “what I found in the existing code” explanation (bullets)
+2. The proposed extension design (bullets + module list)
+3. The full code (ready to run) and how to execute it
+4. The judge prompts (final text) and JSON schema
+5. The artifact documents content (Markdown)
+6. Example output row(s) to show schema correctness
+
+### Before you start
+
+If any needed info is missing (e.g., existing repo not provided, dataset format unknown), do not stop.
+Instead:
+
+* make reasonable assumptions,
+* clearly label them,
+* provide a default golden dataset schema and example,
+* proceed with an implementable solution.
+
+---
+
+## What this improves vs your current prompt
+
+* Forces the agent to **first understand the existing retrieval script** (your biggest risk).
+* Makes “generation benchmarking” concrete: **modules, schema, prompts, metrics, artifacts**.
+* Removes ambiguity about “rows = total base queries alterations” by defining **run granularity**.
+* Locks the judge into **JSON output** so you can compute metrics reliably.
+* Prevents the agent from stalling by requiring **assumptions + default schemas**.
+
+---
+
+If you paste your current retrieval benchmarking script (or repo structure + key files), I can also tailor this prompt to your exact code style (config pattern, logging, outputs) so the agent’s changes slot in cleanly.
+
+==================================================================
+
+
 Your Goal:
 Transform raw onboarding notes into a clear, professional, support-ready document.
 
